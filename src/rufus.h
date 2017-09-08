@@ -425,6 +425,7 @@ extern void UpdateProgress(int op, float percent);
 extern const char* StrError(DWORD error_code, BOOL use_default_locale);
 extern char* GuidToString(const GUID* guid);
 extern char* SizeToHumanReadable(uint64_t size, BOOL copy_to_log, BOOL fake_units);
+extern char* TimestampToHumanReadable(uint64_t ts);
 extern HWND MyCreateDialog(HINSTANCE hInstance, int Dialog_ID, HWND hWndParent, DLGPROC lpDialogFunc);
 extern INT_PTR MyDialogBox(HINSTANCE hInstance, int Dialog_ID, HWND hWndParent, DLGPROC lpDialogFunc);
 extern void CenterDialog(HWND hDlg);
@@ -477,6 +478,7 @@ extern char* insert_section_data(const char* filename, const char* section, cons
 extern char* replace_in_token_data(const char* filename, const char* token, const char* src, const char* rep, BOOL dos2unix);
 extern char* replace_char(const char* src, const char c, const char* rep);
 extern void parse_update(char* buf, size_t len);
+extern void* get_data_from_asn1(const uint8_t* buf, size_t buf_len, const char* oid_str, uint8_t asn1_type, size_t* data_len);
 extern uint8_t WimExtractCheck(void);
 extern BOOL WimExtractFile(const char* wim_image, int index, const char* src, const char* dst);
 extern BOOL WimExtractFile_API(const char* image, int index, const char* src, const char* dst);
@@ -487,6 +489,7 @@ extern BOOL AppendVHDFooter(const char* vhd_path);
 extern int SetWinToGoIndex(void);
 extern int IsHDD(DWORD DriveIndex, uint16_t vid, uint16_t pid, const char* strid);
 extern char* GetSignatureName(const char* path);
+extern uint64_t GetSignatureTimeStamp(const char* path);
 extern LONG ValidateSignature(HWND hDlg, const char* path);
 extern BOOL IsFontAvailable(const char* font_name);
 extern BOOL WriteFileWithRetry(HANDLE hFile, LPCVOID lpBuffer, DWORD nNumberOfBytesToWrite,
