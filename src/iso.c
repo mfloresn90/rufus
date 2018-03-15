@@ -32,6 +32,7 @@
 #include <errno.h>
 #include <direct.h>
 #include <ctype.h>
+#include <virtdisk.h>
 
 #include <cdio/cdio.h>
 #include <cdio/logging.h>
@@ -57,9 +58,9 @@ void cdio_destroy (CdIo_t* p_cdio) {}
 uint32_t GetInstallWimVersion(const char* iso);
 
 typedef struct {
+	BOOLEAN is_cfg;
 	BOOLEAN is_syslinux_cfg;
 	BOOLEAN is_grub_cfg;
-	BOOLEAN is_arch_cfg;
 	BOOLEAN is_old_c32[NB_OLD_C32];
 } EXTRACT_PROPS;
 
@@ -83,7 +84,6 @@ static const char* install_wim_name[] = { "install.wim", "install.swm" };
 static const char* grub_dirname = "/boot/grub/i386-pc";
 static const char* grub_cfg = "grub.cfg";
 static const char* syslinux_cfg[] = { "isolinux.cfg", "syslinux.cfg", "extlinux.conf" };
-static const char* arch_cfg[] = { "archiso_sys.cfg", "archiso_sys32.cfg", "archiso_sys64.cfg" };
 static const char* isolinux_bin[] = { "isolinux.bin", "boot.bin" };
 static const char* pe_dirname[] = { "/i386", "/minint" };
 static const char* pe_file[] = { "ntdetect.com", "setupldr.bin", "txtsetup.sif" };
@@ -144,11 +144,12 @@ static void log_handler (cdio_log_level_t level, const char *message)
 static BOOL check_iso_props(const char* psz_dirname, int64_t i_file_length, const char* psz_basename,
 	const char* psz_fullpath, EXTRACT_PROPS *props)
 {
-	size_t i, j;
+	size_t i, j, len;
 	// Check for an isolinux/syslinux config file anywhere
 	memset(props, 0, sizeof(EXTRACT_PROPS));
 	for (i=0; i<ARRAYSIZE(syslinux_cfg); i++) {
 		if (safe_stricmp(psz_basename, syslinux_cfg[i]) == 0) {
+			props->is_cfg = TRUE;	// Required for "extlinux.conf"
 			props->is_syslinux_cfg = TRUE;
 			if ((scan_only) && (i == 1) && (safe_stricmp(psz_dirname, efi_dirname) == 0))
 				img_report.has_efi_syslinux = TRUE;
@@ -161,13 +162,11 @@ static BOOL check_iso_props(const char* psz_dirname, int64_t i_file_length, cons
 			props->is_old_c32[i] = TRUE;
 	}
 
-	// Check for ArchLinux derivatives config files
+	// Check for config files that may need patching
 	if (!scan_only) {
-		for (i = 0; i<ARRAYSIZE(arch_cfg); i++) {
-			if (safe_stricmp(psz_basename, arch_cfg[i]) == 0) {
-				props->is_arch_cfg = TRUE;
-			}
-		}
+		len = safe_strlen(psz_basename);
+		if ((len >= 4) && safe_stricmp(&psz_basename[len-4], ".cfg") == 0)
+			props->is_cfg = TRUE;
 	}
 
 	// Check for GRUB artifacts
@@ -276,7 +275,7 @@ static void fix_config(const char* psz_fullpath, const char* psz_path, const cha
 
 	// Workaround for config files requiring an ISO label for kernel append that may be
 	// different from our USB label. Oh, and these labels must have spaces converted to \x20.
-	if ((props->is_syslinux_cfg) || (props->is_grub_cfg) || (props->is_arch_cfg)) {
+	if (props->is_cfg) {
 		iso_label = replace_char(img_report.label, ' ', "\\x20");
 		usb_label = replace_char(img_report.usb_label, ' ', "\\x20");
 		if ((iso_label != NULL) && (usb_label != NULL)) {
@@ -468,7 +467,7 @@ static int udf_extract_files(udf_t *p_udf, udf_dirent_t *p_udf_dirent, const cha
 			// The drawback however is with cancellation. With a large file, CloseHandle()
 			// may take forever to complete and is not interruptible. We try to detect this.
 			ISO_BLOCKING(safe_closehandle(file_handle));
-			if (props.is_syslinux_cfg || props.is_grub_cfg || props.is_arch_cfg)
+			if (props.is_cfg)
 				fix_config(psz_sanpath, psz_path, psz_basename, &props);
 			safe_free(psz_sanpath);
 		}
@@ -498,7 +497,7 @@ static int iso_extract_files(iso9660_t* p_iso, const char *psz_path)
 	CdioListNode_t* p_entnode;
 	iso9660_stat_t *p_statbuf;
 	CdioList_t* p_entlist;
-	size_t i;
+	size_t i, j;
 	lsn_t lsn;
 	int64_t i_file_length;
 
@@ -552,7 +551,7 @@ static int iso_extract_files(iso9660_t* p_iso, const char *psz_path)
 			if (iso_extract_files(p_iso, psz_iso_name))
 				goto out;
 		} else {
-			i_file_length = p_statbuf->size;
+			i_file_length = p_statbuf->total_size;
 			if (check_iso_props(psz_path, i_file_length, psz_basename, psz_fullpath, &props)) {
 				continue;
 			}
@@ -586,24 +585,27 @@ static int iso_extract_files(iso9660_t* p_iso, const char *psz_path)
 					uprintf(stupid_antivirus);
 				else
 					goto out;
-			} else for (i=0; i_file_length>0; i++) {
-				if (FormatStatus) goto out;
-				memset(buf, 0, ISO_BLOCKSIZE);
-				lsn = p_statbuf->lsn + (lsn_t)i;
-				if (iso9660_iso_seek_read(p_iso, buf, lsn, 1) != ISO_BLOCKSIZE) {
-					uprintf("  Error reading ISO9660 file %s at LSN %lu",
-						psz_iso_name, (long unsigned int)lsn);
-					goto out;
+			} else for (j=0; j<p_statbuf->extents; j++) {
+				i_file_length = p_statbuf->size[j];
+				for (i=0; i_file_length>0; i++) {
+					if (FormatStatus) goto out;
+					memset(buf, 0, ISO_BLOCKSIZE);
+					lsn = p_statbuf->lsn[j] + (lsn_t)i;
+					if (iso9660_iso_seek_read(p_iso, buf, lsn, 1) != ISO_BLOCKSIZE) {
+						uprintf("  Error reading ISO9660 file %s at LSN %lu",
+							psz_iso_name, (long unsigned int)lsn);
+						goto out;
+					}
+					buf_size = (DWORD)MIN(i_file_length, ISO_BLOCKSIZE);
+					ISO_BLOCKING(r = WriteFileWithRetry(file_handle, buf, buf_size, &wr_size, WRITE_RETRIES));
+					if (!r) {
+						uprintf("  Error writing file: %s", WindowsErrorString());
+						goto out;
+					}
+					i_file_length -= ISO_BLOCKSIZE;
+					if (nb_blocks++ % PROGRESS_THRESHOLD == 0)
+						UpdateProgress(OP_DOS, 100.0f*nb_blocks/total_blocks);
 				}
-				buf_size = (DWORD)MIN(i_file_length, ISO_BLOCKSIZE);
-				ISO_BLOCKING(r = WriteFileWithRetry(file_handle, buf, buf_size, &wr_size, WRITE_RETRIES));
-				if (!r) {
-					uprintf("  Error writing file: %s", WindowsErrorString());
-					goto out;
-				}
-				i_file_length -= ISO_BLOCKSIZE;
-				if (nb_blocks++ % PROGRESS_THRESHOLD == 0)
-					UpdateProgress(OP_DOS, 100.0f*nb_blocks/total_blocks);
 			}
 			if (preserve_timestamps) {
 				LPFILETIME ft = to_filetime(mktime(&p_statbuf->tm));
@@ -611,7 +613,7 @@ static int iso_extract_files(iso9660_t* p_iso, const char *psz_path)
 					uprintf("  Could not set timestamp: %s", WindowsErrorString());
 			}
 			ISO_BLOCKING(safe_closehandle(file_handle));
-			if (props.is_syslinux_cfg || props.is_grub_cfg || props.is_arch_cfg)
+			if (props.is_cfg)
 				fix_config(psz_sanpath, psz_path, psz_basename, &props);
 			safe_free(psz_sanpath);
 		}
@@ -944,7 +946,7 @@ out:
 
 int64_t ExtractISOFile(const char* iso, const char* iso_file, const char* dest_file, DWORD attributes)
 {
-	size_t i;
+	size_t i, j;
 	ssize_t read_size;
 	int64_t file_length, r = 0;
 	char buf[UDF_BLOCKSIZE];
@@ -1009,21 +1011,23 @@ try_iso:
 		goto out;
 	}
 
-	file_length = p_statbuf->size;
-	for (i = 0; file_length > 0; i++) {
-		memset(buf, 0, ISO_BLOCKSIZE);
-		lsn = p_statbuf->lsn + (lsn_t)i;
-		if (iso9660_iso_seek_read(p_iso, buf, lsn, 1) != ISO_BLOCKSIZE) {
-			uprintf("  Error reading ISO9660 file %s at LSN %lu", iso_file, (long unsigned int)lsn);
-			goto out;
+	for (j = 0; j < p_statbuf->extents; j++) {
+		file_length = p_statbuf->size[j];
+		for (i = 0; file_length > 0; i++) {
+			memset(buf, 0, ISO_BLOCKSIZE);
+			lsn = p_statbuf->lsn[j] + (lsn_t)i;
+			if (iso9660_iso_seek_read(p_iso, buf, lsn, 1) != ISO_BLOCKSIZE) {
+				uprintf("  Error reading ISO9660 file %s at LSN %lu", iso_file, (long unsigned int)lsn);
+				goto out;
+			}
+			buf_size = (DWORD)MIN(file_length, ISO_BLOCKSIZE);
+			if (!WriteFileWithRetry(file_handle, buf, buf_size, &wr_size, WRITE_RETRIES)) {
+				uprintf("  Error writing file %s: %s", dest_file, WindowsErrorString());
+				goto out;
+			}
+			file_length -= ISO_BLOCKSIZE;
+			r += ISO_BLOCKSIZE;
 		}
-		buf_size = (DWORD)MIN(file_length, ISO_BLOCKSIZE);
-		if (!WriteFileWithRetry(file_handle, buf, buf_size, &wr_size, WRITE_RETRIES)) {
-			uprintf("  Error writing file %s: %s", dest_file, WindowsErrorString());
-			goto out;
-		}
-		file_length -= ISO_BLOCKSIZE;
-		r += ISO_BLOCKSIZE;
 	}
 
 out:
@@ -1092,8 +1096,8 @@ try_iso:
 		uprintf("Could not get ISO-9660 file information for file %s", wim_path);
 		goto out;
 	}
-	if (iso9660_iso_seek_read(p_iso, buf, p_statbuf->lsn, 1) != ISO_BLOCKSIZE) {
-		uprintf("Error reading ISO-9660 file %s at LSN %lu", wim_path, (long unsigned int)p_statbuf->lsn);
+	if (iso9660_iso_seek_read(p_iso, buf, p_statbuf->lsn[0], 1) != ISO_BLOCKSIZE) {
+		uprintf("Error reading ISO-9660 file %s at LSN %d", wim_path, p_statbuf->lsn[0]);
 		goto out;
 	}
 	r = wim_header[3];
@@ -1190,7 +1194,7 @@ BOOL ExtractEfiImgFiles(const char* dir)
 	if (p_private == NULL)
 		goto out;
 	p_private->p_iso = p_iso;
-	p_private->lsn = p_statbuf->lsn;
+	p_private->lsn = p_statbuf->lsn[0];	// Image should be small enough not to use multiextents
 	p_private->sec_start = 0;
 	// Populate our intial buffer
 	if (iso9660_iso_seek_read(p_private->p_iso, p_private->buf, p_private->lsn, ISO_NB_BLOCKS) != ISO_NB_BLOCKS * ISO_BLOCKSIZE) {

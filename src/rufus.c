@@ -47,14 +47,6 @@
 #include "../res/grub/grub_version.h"
 #include "../res/grub2/grub2_version.h"
 
-// ImageList calls are unavailable on XP
-PF_TYPE_DECL(WINAPI, HIMAGELIST, ImageList_Create, (int, int, UINT, int, int));
-PF_TYPE_DECL(WINAPI, int, ImageList_AddIcon, (HIMAGELIST, HICON));
-PF_TYPE_DECL(WINAPI, int, ImageList_ReplaceIcon, (HIMAGELIST, int, HICON));
-
-PF_TYPE_DECL(WINAPI, BOOL, SHChangeNotifyDeregister, (ULONG));
-PF_TYPE_DECL(WINAPI, ULONG, SHChangeNotifyRegister, (HWND, int, LONG, UINT, int, const MY_SHChangeNotifyEntry*));
-
 const char* cmdline_hogger = "rufus.com";
 const char* FileSystemLabel[FS_MAX] = { "FAT", "FAT32", "NTFS", "UDF", "exFAT", "ReFS" };
 const char* ep_reg = "Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\Explorer";
@@ -92,8 +84,7 @@ char msgbox[1024], msgbox_title[32], *ini_file = NULL;
 OPENED_LIBRARIES_VARS;
 HINSTANCE hMainInstance;
 HWND hMainDialog, hLangToolbar = NULL, hUpdatesDlg = NULL;
-MY_BUTTON_IMAGELIST bi_iso = { 0 }, bi_up = { 0 }, bi_down = { 0 };
-GetTickCount64_t pfGetTickCount64 = NULL;
+BUTTON_IMAGELIST bi_iso = { 0 }, bi_up = { 0 }, bi_down = { 0 };
 char szFolderPath[MAX_PATH], app_dir[MAX_PATH], system_dir[MAX_PATH], temp_dir[MAX_PATH], sysnative_dir[MAX_PATH];
 char* image_path = NULL;
 float fScale = 1.0f;
@@ -114,7 +105,8 @@ uint16_t rufus_version[3], embedded_sl_version[2];
 char embedded_sl_version_str[2][12] = { "?.??", "?.??" };
 char embedded_sl_version_ext[2][32];
 RUFUS_UPDATE update = { {0,0,0}, {0,0}, NULL, NULL};
-StrArray DriveID, DriveLabel, BlockingProcess;
+StrArray DriveID, DriveLabel, DriveHub, BlockingProcess;
+uint32_t DrivePort[MAX_DRIVES];
 extern char* szStatusMessage;
 
 static HANDLE format_thid = NULL, dialog_handle = NULL;
@@ -264,22 +256,18 @@ static BOOL DefineClusterSizes(void)
 			}
 		}
 
-		// exFAT (requires KB955704 installed on XP => don't bother)
-		if (nWindowsVersion > WINDOWS_XP) {
-			SelectedDrive.ClusterSize[FS_EXFAT].Allowed = 0x03FFFE00;
-			if (SelectedDrive.DiskSize < 256*MB)	// < 256 MB
-				SelectedDrive.ClusterSize[FS_EXFAT].Default = 4*KB;
-			else if (SelectedDrive.DiskSize < 32*GB)	// < 32 GB
-				SelectedDrive.ClusterSize[FS_EXFAT].Default = 32*KB;
-			else
-				SelectedDrive.ClusterSize[FS_EXFAT].Default = 128*KB;
-		}
+		// exFAT
+		SelectedDrive.ClusterSize[FS_EXFAT].Allowed = 0x03FFFE00;
+		if (SelectedDrive.DiskSize < 256*MB)	// < 256 MB
+			SelectedDrive.ClusterSize[FS_EXFAT].Default = 4*KB;
+		else if (SelectedDrive.DiskSize < 32*GB)	// < 32 GB
+			SelectedDrive.ClusterSize[FS_EXFAT].Default = 32*KB;
+		else
+			SelectedDrive.ClusterSize[FS_EXFAT].Default = 128*KB;
 
-		// UDF (only supported for Vista and later)
-		if (nWindowsVersion >= WINDOWS_VISTA) {
-			SelectedDrive.ClusterSize[FS_UDF].Allowed = SINGLE_CLUSTERSIZE_DEFAULT;
-			SelectedDrive.ClusterSize[FS_UDF].Default = 1;
-		}
+		// UDF
+		SelectedDrive.ClusterSize[FS_UDF].Allowed = SINGLE_CLUSTERSIZE_DEFAULT;
+		SelectedDrive.ClusterSize[FS_UDF].Default = 1;
 
 		// ReFS (only supported for Windows 8.1 and later and for fixed disks)
 		if (SelectedDrive.DiskSize >= 512*MB) {
@@ -444,10 +432,7 @@ static BOOL SetDriveInfo(int ComboIndex)
 	}
 
 	for (i=0; i<3; i++) {
-		// Populate MBR/BIOS, MBR/UEFI and GPT/UEFI targets, with an exception
-		// for XP, as it doesn't support GPT at all
-		if ((i == 2) && (nWindowsVersion <= WINDOWS_XP))
-			continue;
+		// Populate MBR/BIOS, MBR/UEFI and GPT/UEFI targets
 		pt = (i==2)?PARTITION_STYLE_GPT:PARTITION_STYLE_MBR;
 		if (i==0) {
 			SetMBRForUEFI(FALSE);
@@ -484,9 +469,14 @@ static void SetFSFromISO(void)
 		fs_mask |= 1<<fs;
 	}
 
+	// The presence of a 4GB file forces the use of NTFS as default FS
+	if (img_report.has_4GB_file) {
+		if (fs_mask & (1 << FS_NTFS)) {
+			selected_fs = FS_NTFS;
+		}
 	// Syslinux and EFI have precedence over bootmgr (unless the user selected BIOS as target type)
-	if ((HAS_SYSLINUX(img_report)) || (HAS_REACTOS(img_report)) || HAS_KOLIBRIOS(img_report) ||
-		(IS_EFI_BOOTABLE(img_report) && (tt == TT_UEFI) && (!img_report.has_4GB_file) && (!windows_to_go))) {
+	} else if ((HAS_SYSLINUX(img_report)) || (HAS_REACTOS(img_report)) || HAS_KOLIBRIOS(img_report) ||
+		(IS_EFI_BOOTABLE(img_report) && (tt == TT_UEFI) && (!windows_to_go))) {
 		if (fs_mask & (1<<FS_FAT32)) {
 			selected_fs = FS_FAT32;
 		} else if ((fs_mask & (1<<FS_FAT16)) && !HAS_KOLIBRIOS(img_report)) {
@@ -814,8 +804,8 @@ void UpdateProgress(int op, float percent)
 	}
 
 	// Reduce the refresh rate, to avoid weird effects on the sliding part of progress bar
-	if (_GetTickCount64() > LastRefresh + (2 * MAX_REFRESH)) {
-		LastRefresh = _GetTickCount64();
+	if (GetTickCount64() > LastRefresh + (2 * MAX_REFRESH)) {
+		LastRefresh = GetTickCount64();
 		SendMessage(hProgress, PBM_SETPOS, (WPARAM)pos, 0);
 		SetTaskbarProgressValue(pos, MAX_PROGRESS);
 	}
@@ -1089,7 +1079,8 @@ DWORD WINAPI ISOScanThread(LPVOID param)
 		}
 		if (!dont_display_image_name) {
 			for (i = (int)safe_strlen(image_path); (i > 0) && (image_path[i] != '\\'); i--);
-			PrintStatusDebug(0, MSG_205, &image_path[i + 1]);
+			PrintStatus(0, MSG_205, &image_path[i + 1]);
+			uprintf("Using image: %s (%s)", &image_path[i + 1], SizeToHumanReadable(img_report.image_size, FALSE, FALSE));
 		}
 		// Lose the focus on the select ISO (but place it on Close)
 		SendMessage(hMainDialog, WM_NEXTDLGCTL, (WPARAM)FALSE, 0);
@@ -1701,10 +1692,6 @@ static void InitDialog(HWND hDlg)
 	ShowWindow(GetDlgItem(hDlg, IDC_TEST), SW_SHOW);
 #endif
 
-	PF_INIT(ImageList_Create, Comctl32);
-	PF_INIT(ImageList_AddIcon, Comctl32);
-	PF_INIT(ImageList_ReplaceIcon, Comctl32);
-
 	// Quite a burden to carry around as parameters
 	hMainDialog = hDlg;
 	MainThreadId = GetCurrentThreadId();
@@ -1741,7 +1728,7 @@ static void InitDialog(HWND hDlg)
 
 	// Create the font and brush for the Info edit box
 	hInfoFont = CreateFontA(lfHeight, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-		0, 0, PROOF_QUALITY, 0, (nWindowsVersion >= WINDOWS_VISTA)?"Segoe UI":"Arial Unicode MS");
+		0, 0, PROOF_QUALITY, 0, "Segoe UI");
 	SendDlgItemMessageA(hDlg, IDC_INFO, WM_SETFONT, (WPARAM)hInfoFont, TRUE);
 	hInfoBrush = CreateSolidBrush(GetSysColor(COLOR_BTNFACE));
 	HideCaret(hInfo);
@@ -1822,9 +1809,10 @@ static void InitDialog(HWND hDlg)
 	}
 	IGNORE_RETVAL(ComboBox_SetCurSel(hDiskID, 0));
 
-	// Create the string array
+	// Create the string arrays
 	StrArrayCreate(&DriveID, MAX_DRIVES);
 	StrArrayCreate(&DriveLabel, MAX_DRIVES);
+	StrArrayCreate(&DriveHub, MAX_DRIVES);
 	StrArrayCreate(&BlockingProcess, 16);
 	// Set various checkboxes
 	CheckDlgButton(hDlg, IDC_QUICKFORMAT, BST_CHECKED);
@@ -1845,22 +1833,15 @@ static void InitDialog(HWND hDlg)
 		hIconLang = (HICON)LoadImage(hINetCplDllInst, MAKEINTRESOURCE(1313), IMAGE_ICON, s16, s16, LR_DEFAULTCOLOR | LR_SHARED);
 	}
 
-	if (nWindowsVersion >= WINDOWS_VISTA) {
-		hIconDown = (HICON)LoadImage(hShell32DllInst, MAKEINTRESOURCE(16750), IMAGE_ICON, s16, s16, LR_DEFAULTCOLOR | LR_SHARED);
-		hIconUp = (HICON)LoadImage(hShell32DllInst, MAKEINTRESOURCE(16749), IMAGE_ICON, s16, s16, LR_DEFAULTCOLOR | LR_SHARED);
-	} else {
-		hIconDown = (HICON)LoadImage(hMainInstance, MAKEINTRESOURCE(IDI_DOWN), IMAGE_ICON, 16, 16, 0);
-		hIconUp = (HICON)LoadImage(hMainInstance, MAKEINTRESOURCE(IDI_UP), IMAGE_ICON, 16, 16, 0);
-	}
+	hIconDown = (HICON)LoadImage(hShell32DllInst, MAKEINTRESOURCE(16750), IMAGE_ICON, s16, s16, LR_DEFAULTCOLOR | LR_SHARED);
+	hIconUp = (HICON)LoadImage(hShell32DllInst, MAKEINTRESOURCE(16749), IMAGE_ICON, s16, s16, LR_DEFAULTCOLOR | LR_SHARED);
 
 	// Create the language toolbar
 	hLangToolbar = CreateWindowExW(0, TOOLBARCLASSNAME, NULL, WS_CHILD | WS_TABSTOP | TBSTYLE_TRANSPARENT | CCS_NOPARENTALIGN |
 		CCS_NORESIZE | CCS_NODIVIDER, 0, 0, 0, 0, hMainDialog, NULL, hMainInstance, NULL);
-	if ((pfImageList_Create != NULL) && (pfImageList_AddIcon != NULL)) {
-		hLangToolbarImageList = pfImageList_Create(i16, i16, ILC_COLOR32, 1, 0);
-		pfImageList_AddIcon(hLangToolbarImageList, hIconLang);
-		SendMessage(hLangToolbar, TB_SETIMAGELIST, (WPARAM)0, (LPARAM)hLangToolbarImageList);
-	}
+	hLangToolbarImageList = ImageList_Create(i16, i16, ILC_COLOR32, 1, 0);
+	ImageList_AddIcon(hLangToolbarImageList, hIconLang);
+	SendMessage(hLangToolbar, TB_SETIMAGELIST, (WPARAM)0, (LPARAM)hLangToolbarImageList);
 	SendMessage(hLangToolbar, TB_BUTTONSTRUCTSIZE, (WPARAM)sizeof(TBBUTTON), 0);
 	memset(tbLangToolbarButtons, 0, sizeof(TBBUTTON));
 	tbLangToolbarButtons[0].idCommand = lang_button_id;
@@ -1909,25 +1890,22 @@ static void InitDialog(HWND hDlg)
 	info_original_proc = (WNDPROC)SetWindowLongPtr(hInfo, GWLP_WNDPROC, (LONG_PTR)InfoCallback);
 
 	// Set the icons on the the buttons
-	if ((pfImageList_Create != NULL) && (pfImageList_ReplaceIcon != NULL)) {
+	bi_iso.himl = ImageList_Create(i16, i16, ILC_COLOR32 | ILC_MASK, 1, 0);
+	ImageList_ReplaceIcon(bi_iso.himl, -1, hIconDisc);
+	SetRect(&bi_iso.margin, 0, 1, 0, 0);
+	bi_iso.uAlign = BUTTON_IMAGELIST_ALIGN_CENTER;
+	bi_down.himl = ImageList_Create(i16, i16, ILC_COLOR32 | ILC_MASK, 1, 0);
+	ImageList_ReplaceIcon(bi_down.himl, -1, hIconDown);
+	SetRect(&bi_down.margin, 0, 0, 0, 0);
+	bi_down.uAlign = BUTTON_IMAGELIST_ALIGN_CENTER;
+	bi_up.himl = ImageList_Create(i16, i16, ILC_COLOR32 | ILC_MASK, 1, 0);
+	ImageList_ReplaceIcon(bi_up.himl, -1, hIconUp);
+	SetRect(&bi_up.margin, 0, 0, 0, 0);
+	bi_up.uAlign = BUTTON_IMAGELIST_ALIGN_CENTER;
 
-		bi_iso.himl = pfImageList_Create(i16, i16, ILC_COLOR32 | ILC_MASK, 1, 0);
-		pfImageList_ReplaceIcon(bi_iso.himl, -1, hIconDisc);
-		SetRect(&bi_iso.margin, 0, 1, 0, 0);
-		bi_iso.uAlign = BUTTON_IMAGELIST_ALIGN_CENTER;
-		bi_down.himl = pfImageList_Create(i16, i16, ILC_COLOR32 | ILC_MASK, 1, 0);
-		pfImageList_ReplaceIcon(bi_down.himl, -1, hIconDown);
-		SetRect(&bi_down.margin, 0, 0, 0, 0);
-		bi_down.uAlign = BUTTON_IMAGELIST_ALIGN_CENTER;
-		bi_up.himl = pfImageList_Create(i16, i16, ILC_COLOR32 | ILC_MASK, 1, 0);
-		pfImageList_ReplaceIcon(bi_up.himl, -1, hIconUp);
-		SetRect(&bi_up.margin, 0, 0, 0, 0);
-		bi_up.uAlign = BUTTON_IMAGELIST_ALIGN_CENTER;
-
-		SendMessage(hSelectISO, BCM_SETIMAGELIST, 0, (LPARAM)&bi_iso);
-		SendMessage(GetDlgItem(hDlg, IDC_ADVANCED), BCM_SETIMAGELIST, 0,
-			(LPARAM)(advanced_mode?&bi_up:&bi_down));
-	}
+	SendMessage(hSelectISO, BCM_SETIMAGELIST, 0, (LPARAM)&bi_iso);
+	SendMessage(GetDlgItem(hDlg, IDC_ADVANCED), BCM_SETIMAGELIST, 0,
+		(LPARAM)(advanced_mode?&bi_up:&bi_down));
 
 	// Set the various tooltips
 	CreateTooltip(hFileSystem, lmprintf(MSG_157), -1);
@@ -1952,10 +1930,8 @@ static void InitDialog(HWND hDlg)
 	CreateTooltip(hLangToolbar, lmprintf(MSG_273), -1);
 
 	// Set a label for the Advanced Mode and Select Image button for screen readers
-	if (nWindowsVersion > WINDOWS_XP) {
-		SetWindowTextU(GetDlgItem(hDlg, IDC_ADVANCED), lmprintf(MSG_160));
-		SetWindowTextU(hSelectISO, lmprintf(MSG_165));
-	}
+	SetWindowTextU(GetDlgItem(hDlg, IDC_ADVANCED), lmprintf(MSG_160));
+	SetWindowTextU(hSelectISO, lmprintf(MSG_165));
 
 	if (!advanced_mode)	// Hide as needed, since we display the advanced controls by default
 		ToggleAdvanced(FALSE);
@@ -2187,7 +2163,7 @@ static BOOL CheckDriveAccess(DWORD dwTimeOut)
 	char *PhysicalPath = NULL, DevPath[MAX_PATH];
 	char drive_letter[27], drive_name[] = "?:";
 	char *message, title[128];
-	DWORD cur_time, end_time = GetTickCount() + dwTimeOut;
+	uint64_t cur_time, end_time = GetTickCount64() + dwTimeOut;
 
 	// Get the current selected device
 	DWORD DeviceNum = (DWORD)ComboBox_GetItemData(hDeviceList, ComboBox_GetCurSel(hDeviceList));
@@ -2217,10 +2193,10 @@ static BOOL CheckDriveAccess(DWORD dwTimeOut)
 		drive_name[0] = drive_letter[i];
 		if (QueryDosDeviceA(drive_name, DevPath, sizeof(DevPath)) != 0) {
 			StrArrayClear(&BlockingProcess);
-			cur_time = GetTickCount();
+			cur_time = GetTickCount64();
 			if (cur_time >= end_time)
 				break;
-			access_mask = SearchProcess(DevPath, end_time - cur_time, TRUE, TRUE, TRUE);
+			access_mask = SearchProcess(DevPath, (DWORD)(end_time - cur_time), TRUE, TRUE, TRUE);
 			CHECK_FOR_USER_CANCEL;
 			// Ignore if all we have is read-only
 			if ((access_mask & 0x06) || (access_mask == 0x80)) {
@@ -2264,7 +2240,7 @@ static INT_PTR CALLBACK MainCallback(HWND hDlg, UINT message, WPARAM wParam, LPA
 	static BOOL first_log_display = TRUE, isMarquee = FALSE, queued_hotplug_event = FALSE;
 	static ULONG ulRegister = 0;
 	static LPITEMIDLIST pidlDesktop = NULL;
-	static MY_SHChangeNotifyEntry NotifyEntry;
+	static SHChangeNotifyEntry NotifyEntry;
 	static DWORD_PTR thread_affinity[4];
 	DRAWITEMSTRUCT* pDI;
 	HDROP droppedFileInfo;
@@ -2276,7 +2252,7 @@ static INT_PTR CALLBACK MainCallback(HWND hDlg, UINT message, WPARAM wParam, LPA
 	char tmp[128];
 	wchar_t* wbuffer = NULL;
 	loc_cmd* lcmd = NULL;
-	EXT_DECL(img_ext, NULL, __VA_GROUP__("*.img;*.vhd;*.gz;*.bzip2;*.xz;*.lzma;*.Z;*.zip"), __VA_GROUP__(lmprintf(MSG_095)));
+	EXT_DECL(img_ext, NULL, __VA_GROUP__("*.img;*.vhd;*.gz;*.bzip2;*.bz2;*.xz;*.lzma;*.Z;*.zip"), __VA_GROUP__(lmprintf(MSG_095)));
 	EXT_DECL(iso_ext, NULL, __VA_GROUP__("*.iso"), __VA_GROUP__(lmprintf(MSG_036)));
 	LPNMTOOLBAR lpnmtb;
 
@@ -2285,12 +2261,7 @@ static INT_PTR CALLBACK MainCallback(HWND hDlg, UINT message, WPARAM wParam, LPA
 	case WM_COMMAND:
 #ifdef RUFUS_TEST
 		if (LOWORD(wParam) == IDC_TEST) {
-			uprintf("ts = %lld", GetSignatureTimeStamp("C:\\rufus\\rufus-2.17_BETA.exe"));
-//			ExtractEfiImgFiles("C:\\rufus");
-//			ExtractEFI("C:\\rufus\\efi.img", "C:\\rufus\\efi");
-//			uprintf("Proceed = %s", CheckDriveAccess(2000)?"True":"False");
-//			char* choices[] = { "Choice 1", "Choice 2", "Choice 3" };
-//			SelectionDyn("Test Choice", "Unused", choices, ARRAYSIZE(choices));
+			GetDevices(DeviceNum);
 			break;
 		}
 #endif
@@ -2313,7 +2284,6 @@ static INT_PTR CALLBACK MainCallback(HWND hDlg, UINT message, WPARAM wParam, LPA
 		switch(LOWORD(wParam)) {
 		case IDOK:			// close application
 		case IDCANCEL:
-			PF_INIT(SHChangeNotifyDeregister, Shell32);
 			EnableWindow(GetDlgItem(hDlg, IDCANCEL), FALSE);
 			if (format_thid != NULL) {
 				if ((no_confirmation_on_cancel) || (MessageBoxExU(hMainDialog, lmprintf(MSG_105), lmprintf(MSG_049),
@@ -2340,11 +2310,12 @@ static INT_PTR CALLBACK MainCallback(HWND hDlg, UINT message, WPARAM wParam, LPA
 				PrintInfo(0, MSG_201);
 				return (INT_PTR)TRUE;
 			}
-			if ((pfSHChangeNotifyDeregister != NULL) && (ulRegister != 0))
-				pfSHChangeNotifyDeregister(ulRegister);
+			if (ulRegister != 0)
+				SHChangeNotifyDeregister(ulRegister);
 			PostQuitMessage(0);
 			StrArrayDestroy(&DriveID);
 			StrArrayDestroy(&DriveLabel);
+			StrArrayDestroy(&DriveHub);
 			StrArrayDestroy(&BlockingProcess);
 			DestroyAllTooltips();
 			DestroyWindow(hLogDlg);
@@ -2416,6 +2387,8 @@ static INT_PTR CALLBACK MainCallback(HWND hDlg, UINT message, WPARAM wParam, LPA
 			PopulateProperties(ComboBox_GetCurSel(hDeviceList));
 			SendMessage(hMainDialog, WM_COMMAND, (CBN_SELCHANGE<<16) | IDC_FILESYSTEM,
 				ComboBox_GetCurSel(hFileSystem));
+			nDeviceIndex = ComboBox_GetCurSel(hDeviceList);
+			DeviceNum = (nDeviceIndex == CB_ERR) ? 0 : (DWORD)ComboBox_GetItemData(hDeviceList, nDeviceIndex);
 			break;
 		case IDC_NBPASSES:
 			if (HIWORD(wParam) != CBN_SELCHANGE)
@@ -2705,7 +2678,7 @@ static INT_PTR CALLBACK MainCallback(HWND hDlg, UINT message, WPARAM wParam, LPA
 			case DBT_DEVICEARRIVAL:
 			case DBT_DEVICEREMOVECOMPLETE:
 			case DBT_CUSTOMEVENT:	// Sent by our timer refresh function or for card reader media change
-				LastRefresh = _GetTickCount64();
+				LastRefresh = GetTickCount64();
 				KillTimer(hMainDialog, TID_REFRESH_TIMER);
 				if (!format_op_in_progress) {
 					queued_hotplug_event = FALSE;
@@ -2718,8 +2691,8 @@ static INT_PTR CALLBACK MainCallback(HWND hDlg, UINT message, WPARAM wParam, LPA
 				return (INT_PTR)TRUE;
 			case DBT_DEVNODES_CHANGED:
 				// If it's been more than a second since last device refresh, arm a refresh timer
-				if (_GetTickCount64() > LastRefresh + 1000) {
-					LastRefresh = _GetTickCount64();
+				if (GetTickCount64() > LastRefresh + 1000) {
+					LastRefresh = GetTickCount64();
 					SetTimer(hMainDialog, TID_REFRESH_TIMER, 1000, RefreshTimer);
 				}
 				break;
@@ -2730,7 +2703,6 @@ static INT_PTR CALLBACK MainCallback(HWND hDlg, UINT message, WPARAM wParam, LPA
 		break;
 
 	case WM_INITDIALOG:
-		PF_INIT(SHChangeNotifyRegister, shell32);
 		// Make sure fScale is set before the first call to apply localization, so that move/resize scale appropriately
 		hDC = GetDC(hDlg);
 		fScale = GetDeviceCaps(hDC, LOGPIXELSX) / 96.0f;
@@ -2747,12 +2719,12 @@ static INT_PTR CALLBACK MainCallback(HWND hDlg, UINT message, WPARAM wParam, LPA
 		GetDevices(0);
 		CheckForUpdates(FALSE);
 		// Register MEDIA_INSERTED/MEDIA_REMOVED notifications for card readers
-		if ((pfSHChangeNotifyRegister != NULL) && (SUCCEEDED(SHGetSpecialFolderLocation(0, CSIDL_DESKTOP, &pidlDesktop)))) {
+		if (SUCCEEDED(SHGetSpecialFolderLocation(0, CSIDL_DESKTOP, &pidlDesktop))) {
 			NotifyEntry.pidl = pidlDesktop;
 			NotifyEntry.fRecursive = TRUE;
 			// NB: The following only works if the media is already formatted.
 			// If you insert a blank card, notifications will not be sent... :(
-			ulRegister = pfSHChangeNotifyRegister(hDlg, 0x0001 | 0x0002 | 0x8000,
+			ulRegister = SHChangeNotifyRegister(hDlg, 0x0001 | 0x0002 | 0x8000,
 				SHCNE_MEDIAINSERTED | SHCNE_MEDIAREMOVED, UM_MEDIA_CHANGE, 1, &NotifyEntry);
 		}
 		// Bring our Window on top. We have to go through all *THREE* of these, or Far Manager hides our window :(
@@ -3033,7 +3005,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	char *tmp, *locale_name = NULL, **argv = NULL;
 	wchar_t **wenv, **wargv;
 	PF_TYPE_DECL(CDECL, int, __wgetmainargs, (int*, wchar_t***, wchar_t***, int, int*));
-	PF_TYPE_DECL(WINAPI, BOOL, ChangeWindowMessageFilter, (UINT message, DWORD dwFlag));
 	HANDLE mutex = NULL, hogmutex = NULL, hFile = NULL;
 	HWND hDlg = NULL;
 	HDC hDC;
@@ -3052,7 +3023,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	SetDllDirectoryA("");
 
 	uprintf("*** " APPLICATION_NAME " init ***\n");
-	PF_INIT(GetTickCount64, kernel32);
 
 	// Reattach the console, if we were started from commandline
 	if (AttachConsole(ATTACH_PARENT_PROCESS) != 0) {
@@ -3165,7 +3135,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	// Look for a .ini file in the current app directory
 	static_sprintf(ini_path, "%s\\rufus.ini", app_dir);
 	fd = fopenU(ini_path, ini_flags);	// Will create the file if portable mode is requested
-	vc |= (safe_strcmp(GetSignatureName(NULL), cert_name[0]) == 0);
+	vc |= (safe_strcmp(GetSignatureName(NULL, NULL), cert_name[0]) == 0);
 	if (fd != NULL) {
 		ini_file = ini_path;
 		fclose(fd);
@@ -3233,6 +3203,19 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	}
 	selected_langid = get_language_id(selected_locale);
 
+	// Set the Windows version
+	GetWindowsVersion();
+
+	// ...and nothing of value was lost
+	if (nWindowsVersion < WINDOWS_7) {
+		// Load the translation before we print the error
+		get_loc_data_file(loc_file, selected_locale);
+		right_to_left_mode = ((selected_locale->ctrl_id) & LOC_RIGHT_TO_LEFT);
+		// Set MB_SYSTEMMODAL to prevent Far Manager from stealing focus...
+		MessageBoxExU(NULL, lmprintf(MSG_294), lmprintf(MSG_293), MB_ICONSTOP | MB_IS_RTL | MB_SYSTEMMODAL, selected_langid);
+		goto out;
+	}
+
 	// This is needed as there appears to be a *FLAW* in Windows allowing the app to run unelevated with some
 	// weirdly configured user accounts, even as we explicitly set 'requireAdministrator' in the manifest...
 	if (!IsCurrentProcessElevated()) {
@@ -3274,9 +3257,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 		uprintf("Could not load RichEdit library - some dialogs may not display: %s\n", WindowsErrorString());
 	}
 
-	// Set the Windows version
-	GetWindowsVersion();
-
 	// Increase the application privileges (SE_DEBUG_PRIVILEGE), so that we can report
 	// the Windows Services preventing access to the disk or volume we want to format.
 	EnablePrivileges();
@@ -3285,16 +3265,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	// 0x9e disables removable and fixed drive notifications
 	lgp_set = SetLGP(FALSE, &existing_key, ep_reg, "NoDriveTypeAutorun", 0x9e);
 
-	if (nWindowsVersion > WINDOWS_XP) {
-		// Re-enable AutoMount if needed
-		if (!GetAutoMount(&automount)) {
-			uprintf("Could not get AutoMount status");
-			automount = TRUE;	// So that we don't try to change its status on exit
-		} else if (!automount) {
-			uprintf("AutoMount was detected as disabled - temporarily re-enabling it");
-			if (!SetAutoMount(TRUE))
-				uprintf("Failed to enable AutoMount");
-		}
+	// Re-enable AutoMount if needed
+	if (!GetAutoMount(&automount)) {
+		uprintf("Could not get AutoMount status");
+		automount = TRUE;	// So that we don't try to change its status on exit
+	} else if (!automount) {
+		uprintf("AutoMount was detected as disabled - temporarily re-enabling it");
+		if (!SetAutoMount(TRUE))
+			uprintf("Failed to enable AutoMount");
 	}
 
 relaunch:
@@ -3323,18 +3301,11 @@ relaunch:
 	if ((relaunch_rc.left > -65536) && (relaunch_rc.top > -65536))
 		SetWindowPos(hDlg, HWND_TOP, relaunch_rc.left, relaunch_rc.top, 0, 0, SWP_NOSIZE);
 
-	// Enable drag-n-drop through the message filter (for Vista or later)
-	if (nWindowsVersion >= WINDOWS_VISTA) {
-		PF_INIT(ChangeWindowMessageFilter, user32);
-		if (pfChangeWindowMessageFilter != NULL) {
-			// NB: We use ChangeWindowMessageFilter() here because
-			// ChangeWindowMessageFilterEx() is not available on Vista
-			pfChangeWindowMessageFilter(WM_DROPFILES, MSGFLT_ADD);
-			pfChangeWindowMessageFilter(WM_COPYDATA, MSGFLT_ADD);
-			// CopyGlobalData is needed sine we are running elevated
-			pfChangeWindowMessageFilter(WM_COPYGLOBALDATA, MSGFLT_ADD);
-		}
-	}
+	// Enable drag-n-drop through the message filter
+	ChangeWindowMessageFilter(WM_DROPFILES, MSGFLT_ADD);
+	ChangeWindowMessageFilter(WM_COPYDATA, MSGFLT_ADD);
+	// CopyGlobalData is needed sine we are running elevated
+	ChangeWindowMessageFilter(WM_COPYGLOBALDATA, MSGFLT_ADD);
 
 	// Set the hook to automatically close Windows' "You need to format the disk in drive..." prompt
 	if (!SetFormatPromptHook())
@@ -3345,7 +3316,7 @@ relaunch:
 
 	// Do our own event processing and process "magic" commands
 	while(GetMessage(&msg, NULL, 0, 0)) {
-		// ** *****  **** ** ******** *
+		// ** *****  **** ** **********
 		// .,ABCDEFGHIJKLMNOPQRSTUVWXYZ
 
 		// Ctrl-A => Select the log data
@@ -3353,6 +3324,7 @@ relaunch:
 			(msg.message == WM_KEYDOWN) && (msg.wParam == 'A') ) {
 			// Might also need ES_NOHIDESEL property if you want to select when not active
 			Edit_SetSel(hLog, 0, -1);
+			continue;
 		}
 		// Alt-. => Enable USB enumeration debug
 		if ((msg.message == WM_SYSKEYDOWN) && (msg.wParam == VK_OEM_PERIOD)) {
@@ -3379,12 +3351,12 @@ relaunch:
 			PrintStatusTimeout(lmprintf(MSG_256), detect_fakes);
 			continue;
 		}
-		// Alt C => Force the update check to be successful
-		// This will set the reported current version of Rufus to 0.0.0.0 when performing an update
-		// check, so that it always succeeds. This is useful for translators.
+		// Alt-C => Cycle USB port for currently selected device
 		if ((msg.message == WM_SYSKEYDOWN) && (msg.wParam == 'C')) {
-			force_update = !force_update;
-			PrintStatusTimeout(lmprintf(MSG_259), force_update);
+			int index = ComboBox_GetCurSel(hDeviceList);
+			if (index < 0)
+				break;
+			ResetDevice(index);
 			continue;
 		}
 		// Alt-D => Delete the NoDriveTypeAutorun key on exit (useful if the app crashed)
@@ -3467,7 +3439,6 @@ relaunch:
 			PrintStatusTimeout(lmprintf(MSG_290), !disable_file_indexing);
 			continue;
 		}
-
 		// Alt-R => Remove all the registry keys that may have been created by Rufus
 		if ((msg.message == WM_SYSKEYDOWN) && (msg.wParam == 'R')) {
 			PrintStatus(2000, DeleteRegistryKey(REGKEY_HKCU, COMPANY_NAME "\\" APPLICATION_NAME)?MSG_248:MSG_249);
@@ -3519,11 +3490,20 @@ relaunch:
 			SHDeleteDirectoryExU(NULL, tmp_path, FOF_SILENT | FOF_NOERRORUI | FOF_NOCONFIRMATION);
 			continue;
 		}
+		// Alt Y => Force the update check to be successful
+		// This will set the reported current version of Rufus to 0.0.0.0 when performing an update
+		// check, so that it always succeeds. This is useful for translators.
+		if ((msg.message == WM_SYSKEYDOWN) && (msg.wParam == 'Y')) {
+			force_update = !force_update;
+			PrintStatusTimeout(lmprintf(MSG_259), force_update);
+			continue;
+		}
 		// Alt-Z => Zero the drive
 		if ((msg.message == WM_SYSKEYDOWN) && (msg.wParam == 'Z')) {
 			zero_drive = TRUE;
 			// Simulate a button click for Start
 			PostMessage(hDlg, WM_COMMAND, (WPARAM)IDC_START, 0);
+			continue;
 		}
 
 		// Hazardous cheat modes require Ctrl + Alt
@@ -3581,7 +3561,7 @@ out:
 	}
 	if (lgp_set)
 		SetLGP(TRUE, &existing_key, ep_reg, "NoDriveTypeAutorun", 0);
-	if ((nWindowsVersion > WINDOWS_XP) && (!automount) && (!SetAutoMount(FALSE)))
+	if ((!automount) && (!SetAutoMount(FALSE)))
 		uprintf("Failed to restore AutoMount to disabled");
 	ubflush();
 	// Unconditional delete with retry, just in case...

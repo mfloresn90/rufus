@@ -21,8 +21,8 @@
 
 #if defined(_MSC_VER)
 // Disable some VS Code Analysis warnings
-#pragma warning(disable: 4996)		// Ignore deprecated (eg. GetVersionEx()), as we have to contend with XP
-#pragma warning(disable: 28159)		// We use GetTickCount64() where possible, but it's not available on XP
+#pragma warning(disable: 4996)		// Ignore deprecated
+#pragma warning(disable: 28159)		// I'll keep using GetVersionEx(), thank you very much!
 #pragma warning(disable: 6258)		// I know what I'm using TerminateThread for
 #endif
 
@@ -31,7 +31,7 @@
 /* Program options */
 #define RUFUS_LOGGING               // print info to logging facility
 /* Features not ready for prime time and that may *DESTROY* your data - USE AT YOUR OWN RISKS! */
-// #define RUFUS_TEST
+//#define RUFUS_TEST
 
 #define APPLICATION_NAME            "Rufus"
 #define COMPANY_NAME                "Akeo Consulting"
@@ -369,11 +369,11 @@ enum WindowsVersion {
 	WINDOWS_UNDEFINED = -1,
 	WINDOWS_UNSUPPORTED = 0,
 	WINDOWS_XP = 0x51,
-	WINDOWS_2003 = 0x52,	// Also XP x64
-	WINDOWS_VISTA = 0x60,
-	WINDOWS_7 = 0x61,
-	WINDOWS_8 = 0x62,
-	WINDOWS_8_1 = 0x63,
+	WINDOWS_2003 = 0x52,	// Also XP_64
+	WINDOWS_VISTA = 0x60,	// Also 2008
+	WINDOWS_7 = 0x61,		// Also 2008_R2
+	WINDOWS_8 = 0x62,		// Also 2012
+	WINDOWS_8_1 = 0x63,		// Also 2012_R2
 	WINDOWS_10_PREVIEW1 = 0x64,
 	WINDOWS_10 = 0xA0,
 	WINDOWS_MAX
@@ -460,6 +460,7 @@ extern DWORD GetResourceSize(HMODULE module, char* name, char* type, const char*
 extern DWORD RunCommand(const char* cmdline, const char* dir, BOOL log);
 extern BOOL CompareGUID(const GUID *guid1, const GUID *guid2);
 extern BOOL GetDevices(DWORD devnum);
+extern BOOL ResetDevice(int index);
 extern BOOL GetOpticalMedia(IMG_SAVE* img_save);
 extern BOOL SetLGP(BOOL bRestore, BOOL* bExistingKey, const char* szPath, const char* szPolicy, DWORD dwValue);
 extern LONG GetEntryWidth(HWND hDropDown, const char* entry);
@@ -488,7 +489,7 @@ extern BOOL IsBootableImage(const char* path);
 extern BOOL AppendVHDFooter(const char* vhd_path);
 extern int SetWinToGoIndex(void);
 extern int IsHDD(DWORD DriveIndex, uint16_t vid, uint16_t pid, const char* strid);
-extern char* GetSignatureName(const char* path);
+extern char* GetSignatureName(const char* path, const char* country_code);
 extern uint64_t GetSignatureTimeStamp(const char* path);
 extern LONG ValidateSignature(HWND hDlg, const char* path);
 extern BOOL IsFontAvailable(const char* font_name);
@@ -597,8 +598,3 @@ static __inline HMODULE GetLibraryHandle(char* szLibraryName) {
 #define ERROR_CANT_PATCH               0x120A
 #define ERROR_CANT_ASSIGN_LETTER       0x120B
 #define ERROR_CANT_MOUNT_VOLUME        0x120C
-
-/* GetTickCount64 not being available on XP is a massive bother */
-PF_TYPE(WINAPI, ULONGLONG, GetTickCount64, (void));
-extern GetTickCount64_t pfGetTickCount64;
-#define _GetTickCount64() ((pfGetTickCount64 != NULL)?(uint64_t)pfGetTickCount64():(uint64_t)GetTickCount())

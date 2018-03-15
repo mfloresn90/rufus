@@ -40,8 +40,11 @@
 #define szOID_NESTED_SIGNATURE "1.3.6.1.4.1.311.2.4.1"
 #endif
 
-// Signatures names we accept (may be suffixed, but the signature should start with one of those)
+// Signatures names we accept. Must be the the exact name, including capitalization,
+// that CertGetNameStringA(CERT_NAME_ATTR_TYPE, szOID_COMMON_NAME) returns.
 const char* cert_name[3] = { "Akeo Consulting", "Akeo Systems", "Pete Batard" };
+// For added security, we also validate the country code of the certificate recipient.
+const char* cert_country = "IE";
 
 typedef struct {
 	LPWSTR lpszProgramName;
@@ -133,16 +136,17 @@ const char* WinPKIErrorString(void)
 }
 
 // Mostly from https://support.microsoft.com/en-us/kb/323809
-char* GetSignatureName(const char* path)
+char* GetSignatureName(const char* path, const char* country_code)
 {
 	static char szSubjectName[128];
+	char szCountry[3] = "__";
 	char *p = NULL, *mpath = NULL;
 	BOOL r;
 	HMODULE hm;
 	HCERTSTORE hStore = NULL;
 	HCRYPTMSG hMsg = NULL;
 	PCCERT_CONTEXT pCertContext = NULL;
-	DWORD dwSize, dwEncoding, dwContentType, dwFormatType, dwSubjectSize;
+	DWORD dwSize, dwEncoding, dwContentType, dwFormatType;
 	PCMSG_SIGNER_INFO pSignerInfo = NULL;
 	DWORD dwSignerInfo = 0;
 	CERT_INFO CertInfo = { 0 };
@@ -157,12 +161,12 @@ char* GetSignatureName(const char* path)
 		hm = GetModuleHandle(NULL);
 		if (hm == NULL) {
 			uprintf("PKI: Could not get current executable handle: %s", WinPKIErrorString());
-			return NULL;
+			goto out;
 		}
 		dwSize = GetModuleFileNameW(hm, szFileName, MAX_PATH);
 		if ((dwSize == 0) || ((dwSize == MAX_PATH) && (GetLastError() == ERROR_INSUFFICIENT_BUFFER))) {
 			uprintf("PKI: Could not get module filename: %s", WinPKIErrorString());
-			return NULL;
+			goto out;
 		}
 		mpath = wchar_to_utf8(szFileName);
 	} else {
@@ -209,15 +213,32 @@ char* GetSignatureName(const char* path)
 		goto out;
 	}
 
+	// If a country code is provided, validate that the certificate we have is for the same country
+	if (country_code != NULL) {
+		dwSize = CertGetNameStringA(pCertContext, CERT_NAME_ATTR_TYPE, 0, szOID_COUNTRY_NAME,
+			szCountry, sizeof(szCountry));
+		if (dwSize < 2) {
+			uprintf("PKI: Failed to get Country Code");
+			goto out;
+		}
+		if (strcmpi(country_code, szCountry) != 0) {
+			uprintf("PKI: Unexpected Country Code (Found '%s', expected '%s')", szCountry, country_code);
+			goto out;
+		}
+	}
+
 	// Isolate the signing certificate subject name
-	dwSubjectSize = CertGetNameStringA(pCertContext, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0, NULL,
+	dwSize = CertGetNameStringA(pCertContext, CERT_NAME_ATTR_TYPE, 0, szOID_COMMON_NAME,
 		szSubjectName, sizeof(szSubjectName));
-	if (dwSubjectSize <= 1) {
+	if (dwSize <= 1) {
 		uprintf("PKI: Failed to get Subject Name");
 		goto out;
 	}
 
-	uprintf("Downloaded executable is signed by '%s'", szSubjectName);
+	if (szCountry[0] == '_')
+		uprintf("Binary executable is signed by '%s'", szSubjectName);
+	else
+		uprintf("Binary executable is signed by '%s' (%s)", szSubjectName, szCountry);
 	p = szSubjectName;
 
 out:
@@ -240,7 +261,7 @@ out:
 static uint64_t GetRFC3161TimeStamp(PCMSG_SIGNER_INFO pSignerInfo)
 {
 	BOOL r, found = FALSE;
-	DWORD n, dwSize;
+	DWORD n, dwSize = 0;
 	PCRYPT_CONTENT_INFO pCounterSignerInfo = NULL;
 	uint64_t ts = 0ULL;
 	uint8_t *timestamp_token;
@@ -300,7 +321,7 @@ static uint64_t GetRFC3161TimeStamp(PCMSG_SIGNER_INFO pSignerInfo)
 static uint64_t GetNestedRFC3161TimeStamp(PCMSG_SIGNER_INFO pSignerInfo)
 {
 	BOOL r, found = FALSE;
-	DWORD n, dwSize;
+	DWORD n, dwSize = 0;
 	PCRYPT_CONTENT_INFO pNestedSignature = NULL;
 	PCMSG_SIGNER_INFO pNestedSignerInfo = NULL;
 	HCRYPTMSG hMsg = NULL;
@@ -308,10 +329,14 @@ static uint64_t GetNestedRFC3161TimeStamp(PCMSG_SIGNER_INFO pSignerInfo)
 
 	// Loop through unauthenticated attributes for szOID_NESTED_SIGNATURE OID
 	for (n = 0; ; n++) {
-		if (pNestedSignature != NULL)
+		if (pNestedSignature != NULL) {
 			LocalFree(pNestedSignature);
-		if (hMsg != NULL)
+			pNestedSignature = NULL;
+		}
+		if (hMsg != NULL) {
 			CryptMsgClose(hMsg);
+			hMsg = NULL;
+		}
 		safe_free(pNestedSignerInfo);
 		if (n >= pSignerInfo->UnauthAttrs.cAttr)
 			break;
@@ -469,25 +494,21 @@ LONG ValidateSignature(HWND hDlg, const char* path)
 	GUID guid_generic_verify =	// WINTRUST_ACTION_GENERIC_VERIFY_V2
 		{ 0xaac56b, 0xcd44, 0x11d0,{ 0x8c, 0xc2, 0x0, 0xc0, 0x4f, 0xc2, 0x95, 0xee } };
 	char *signature_name;
-	size_t i, len;
+	size_t i;
 	uint64_t current_ts, update_ts;
 
 	// Check the signature name. Make it specific enough (i.e. don't simply check for "Akeo")
 	// so that, besides hacking our server, it'll place an extra hurdle on any malicious entity
 	// into also fooling a C.A. to issue a certificate that passes our test.
-	signature_name = GetSignatureName(path);
+	signature_name = GetSignatureName(path, cert_country);
 	if (signature_name == NULL) {
 		uprintf("PKI: Could not get signature name");
 		MessageBoxExU(hDlg, lmprintf(MSG_284), lmprintf(MSG_283), MB_OK | MB_ICONERROR | MB_IS_RTL, selected_langid);
 		return TRUST_E_NOSIGNATURE;
 	}
 	for (i = 0; i < ARRAYSIZE(cert_name); i++) {
-		len = strlen(cert_name[i]);
-		if (strncmp(signature_name, cert_name[i], len) == 0) {
-			// Test for whitespace after the part we match, for added safety
-			if ((len >= strlen(signature_name)) || isspace(signature_name[len]))
-				break;
-		}
+		if (strcmp(signature_name, cert_name[i]) == 0)
+			break;
 	}
 	if (i >= ARRAYSIZE(cert_name)) {
 		uprintf("PKI: Signature '%s' is unexpected...", signature_name);
