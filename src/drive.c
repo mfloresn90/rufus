@@ -1,7 +1,7 @@
 /*
  * Rufus: The Reliable USB Formatting Utility
  * Drive access function calls
- * Copyright © 2011-2016 Pete Batard <pete@akeo.ie>
+ * Copyright © 2011-2018 Pete Batard <pete@akeo.ie>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -53,10 +53,13 @@ const GUID PARTITION_SYSTEM_GUID =
 	{ 0xc12a7328L, 0xf81f, 0x11d2, {0xba, 0x4b, 0x00, 0xa0, 0xc9, 0x3e, 0xc9, 0x3b} };
 #endif
 
+PF_TYPE_DECL(NTAPI, NTSTATUS, NtQueryVolumeInformationFile, (HANDLE, PIO_STATUS_BLOCK, PVOID, ULONG, FS_INFORMATION_CLASS));
+
 /*
  * Globals
  */
 RUFUS_DRIVE_INFO SelectedDrive;
+const char* sfd_name = "Super Floppy Disk";
 
 /*
  * The following methods get or set the AutoMount setting (which is different from AutoRun)
@@ -400,9 +403,13 @@ static BOOL _GetDriveLettersAndType(DWORD DriveIndex, char* drive_letters, UINT*
 	BOOL r = FALSE;
 	HANDLE hDrive = INVALID_HANDLE_VALUE;
 	UINT _drive_type;
+	IO_STATUS_BLOCK io_status_block;
+	FILE_FS_DEVICE_INFORMATION file_fs_device_info;
 	int i = 0, drive_number;
 	char *drive, drives[26*4 + 1];	/* "D:\", "E:\", etc., plus one NUL */
 	char logical_drive[] = "\\\\.\\#:";
+
+	PF_INIT(NtQueryVolumeInformationFile, Ntdll);
 
 	if (drive_letters != NULL)
 		drive_letters[0] = 0;
@@ -448,6 +455,14 @@ static BOOL _GetDriveLettersAndType(DWORD DriveIndex, char* drive_letters, UINT*
 		if (hDrive == INVALID_HANDLE_VALUE) {
 //			uprintf("Warning: could not open drive %c: %s", drive[0], WindowsErrorString());
 			continue;
+		}
+
+		// Eliminate floppy drives
+		if ((pfNtQueryVolumeInformationFile != NULL) &&
+			(pfNtQueryVolumeInformationFile(hDrive, &io_status_block, &file_fs_device_info,
+				sizeof(file_fs_device_info), FileFsDeviceInformation) == NO_ERROR) &&
+			(file_fs_device_info.Characteristics & FILE_FLOPPY_DISKETTE) ) {
+				continue;
 		}
 
 		drive_number = GetDriveNumber(hDrive, logical_drive);
@@ -756,7 +771,7 @@ BOOL GetDrivePartitionData(DWORD DriveIndex, char* FileSystemName, DWORD FileSys
 #endif
 	switch (DriveLayout->PartitionStyle) {
 	case PARTITION_STYLE_MBR:
-		SelectedDrive.PartitionType = PARTITION_STYLE_MBR;
+		SelectedDrive.PartitionStyle = PARTITION_STYLE_MBR;
 		for (i=0; i<DriveLayout->PartitionCount; i++) {
 			if (DriveLayout->PartitionEntry[i].Mbr.PartitionType != PARTITION_ENTRY_UNUSED) {
 				SelectedDrive.nPartitions++;
@@ -765,7 +780,7 @@ BOOL GetDrivePartitionData(DWORD DriveIndex, char* FileSystemName, DWORD FileSys
 		// Detect drives that are using the whole disk as a single partition
 		if ((DriveLayout->PartitionEntry[0].Mbr.PartitionType != PARTITION_ENTRY_UNUSED) &&
 			(DriveLayout->PartitionEntry[0].StartingOffset.QuadPart == 0LL)) {
-			suprintf("Partition type: SFD (Super Floppy Disk) or Unpartitioned");
+			suprintf("Partition type: SFD (%s) or Unpartitioned", sfd_name);
 			super_floppy_disk = TRUE;
 		} else {
 			suprintf("Partition type: MBR, NB Partitions: %d", SelectedDrive.nPartitions);
@@ -803,7 +818,7 @@ BOOL GetDrivePartitionData(DWORD DriveIndex, char* FileSystemName, DWORD FileSys
 		}
 		break;
 	case PARTITION_STYLE_GPT:
-		SelectedDrive.PartitionType = PARTITION_STYLE_GPT;
+		SelectedDrive.PartitionStyle = PARTITION_STYLE_GPT;
 		suprintf("Partition type: GPT, NB Partitions: %d", DriveLayout->PartitionCount);
 		suprintf("Disk GUID: %s", GuidToString(&DriveLayout->Gpt.DiskId));
 		suprintf("Max parts: %d, Start Offset: %" PRIi64 ", Usable = %" PRIi64 " bytes",
@@ -832,7 +847,7 @@ BOOL GetDrivePartitionData(DWORD DriveIndex, char* FileSystemName, DWORD FileSys
 		}
 		break;
 	default:
-		SelectedDrive.PartitionType = PARTITION_STYLE_MBR;
+		SelectedDrive.PartitionStyle = PARTITION_STYLE_MBR;
 		suprintf("Partition type: RAW");
 		break;
 	}
@@ -1098,7 +1113,7 @@ BOOL CreatePartition(HANDLE hDrive, int partition_style, int file_system, BOOL m
 	}
 
 	// Compute the start offset of our first partition
-	if ((partition_style == PARTITION_STYLE_GPT) || (!IsChecked(IDC_EXTRA_PARTITION))) {
+	if ((partition_style == PARTITION_STYLE_GPT) || (!IsChecked(IDC_OLD_BIOS_FIXES))) {
 		// Go with the MS 1 MB wastage at the beginning...
 		DriveLayoutEx.PartitionEntry[pn].StartingOffset.QuadPart = MB;
 	} else {
@@ -1164,7 +1179,7 @@ BOOL CreatePartition(HANDLE hDrive, int partition_style, int file_system, BOOL m
 	}
 	DriveLayoutEx.PartitionEntry[pn].PartitionLength.QuadPart = main_part_size_in_sectors * SelectedDrive.SectorSize;
 	if (partition_style == PARTITION_STYLE_MBR) {
-		DriveLayoutEx.PartitionEntry[pn].Mbr.BootIndicator = IsChecked(IDC_BOOT);
+		DriveLayoutEx.PartitionEntry[pn].Mbr.BootIndicator = (bt != BT_NON_BOOTABLE);
 		switch (file_system) {
 		case FS_FAT16:
 			DriveLayoutEx.PartitionEntry[pn].Mbr.PartitionType = 0x0e;	// FAT16 LBA

@@ -370,9 +370,21 @@ int32_t StrArrayAdd(StrArray* arr, const char* str, BOOL duplicate)
 	return arr->Index++;
 }
 
+int32_t StrArrayFind(StrArray* arr, const char* str)
+{
+	uint32_t i;
+	if ((str == NULL) || (arr == NULL) || (arr->String == NULL))
+		return -1;
+	for (i = 0; i<arr->Index; i++) {
+		if (strcmp(arr->String[i], str) == 0)
+			return (int32_t)i;
+	}
+	return -1;
+}
+
 void StrArrayClear(StrArray* arr)
 {
-	size_t i;
+	uint32_t i;
 	if ((arr == NULL) || (arr->String == NULL))
 		return;
 	for (i=0; i<arr->Index; i++) {
@@ -445,7 +457,7 @@ static PSID GetSID(void) {
  */
 BOOL FileIO(BOOL save, char* path, char** buffer, DWORD* size)
 {
-	SECURITY_ATTRIBUTES s_attr, *ps = NULL;
+	SECURITY_ATTRIBUTES s_attr, *sa = NULL;
 	SECURITY_DESCRIPTOR s_desc;
 	PSID sid = NULL;
 	HANDLE handle;
@@ -460,7 +472,7 @@ BOOL FileIO(BOOL save, char* path, char** buffer, DWORD* size)
 		s_attr.nLength = sizeof(SECURITY_ATTRIBUTES);
 		s_attr.bInheritHandle = FALSE;
 		s_attr.lpSecurityDescriptor = &s_desc;
-		ps = &s_attr;
+		sa = &s_attr;
 	} else {
 		uprintf("Could not set security descriptor: %s\n", WindowsErrorString());
 	}
@@ -469,7 +481,7 @@ BOOL FileIO(BOOL save, char* path, char** buffer, DWORD* size)
 		*buffer = NULL;
 	}
 	handle = CreateFileU(path, save?GENERIC_WRITE:GENERIC_READ, FILE_SHARE_READ,
-		ps, save?CREATE_ALWAYS:OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+		sa, save?CREATE_ALWAYS:OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
 
 	if (handle == INVALID_HANDLE_VALUE) {
 		uprintf("Could not %s file '%s'\n", save?"create":"open", path);
@@ -628,19 +640,23 @@ static BOOL CALLBACK EnumFontFamExProc(const LOGFONTA *lpelfe,
 	return TRUE;
 }
 
-BOOL IsFontAvailable(const char* font_name) {
+BOOL IsFontAvailable(const char* font_name)
+{
+	BOOL r;
 	LOGFONTA lf = { 0 };
 	HDC hDC = GetDC(hMainDialog);
 
 	if (font_name == NULL) {
-		ReleaseDC(hMainDialog, hDC);
+		safe_release_dc(hMainDialog, hDC);
 		return FALSE;
 	}
 
 	lf.lfCharSet = DEFAULT_CHARSET;
 	safe_strcpy(lf.lfFaceName, LF_FACESIZE, font_name);
 
-	return EnumFontFamiliesExA(hDC, &lf, EnumFontFamExProc, 0, 0);
+	r = EnumFontFamiliesExA(hDC, &lf, EnumFontFamExProc, 0, 0);
+	safe_release_dc(hMainDialog, hDC);
+	return r;
 }
 
 /*

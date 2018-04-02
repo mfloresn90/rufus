@@ -1,7 +1,7 @@
 /*
  * Rufus: The Reliable USB Formatting Utility
  * ISO file extraction
- * Copyright © 2011-2016 Pete Batard <pete@akeo.ie>
+ * Copyright © 2011-2018 Pete Batard <pete@akeo.ie>
  * Based on libcdio's iso & udf samples:
  * Copyright © 2003-2014 Rocky Bernstein <rocky@gnu.org>
  *
@@ -75,7 +75,6 @@ static const char* grldr_name = "grldr";
 static const char* ldlinux_name = "ldlinux.sys";
 static const char* ldlinux_c32 = "ldlinux.c32";
 static const char* efi_dirname = "/efi/boot";
-static const char* efi_img_name = "efi.img";	// Used by Debian Live ISOHybrids
 static const char* efi_bootname[] = { "bootia32.efi", "bootia64.efi", "bootx64.efi", "bootarm.efi", "bootaa64.efi", "bootebc.efi" };
 static const char* install_wim_path = "/sources";
 static const char* install_wim_name[] = { "install.wim", "install.swm" };
@@ -203,8 +202,10 @@ static BOOL check_iso_props(const char* psz_dirname, int64_t i_file_length, cons
 		if ((img_report.reactos_path[0] == 0) && (safe_stricmp(psz_basename, reactos_name) == 0))
 			static_strcpy(img_report.reactos_path, psz_fullpath);
 
-		// Check for the first 'efi.img' we can find (that hopefully contains EFI boot files)
-		if (!HAS_EFI_IMG(img_report) && (safe_stricmp(psz_basename, efi_img_name) == 0))
+		// Check for the first 'efi*.img' we can find (that hopefully contains EFI boot files)
+		if (!HAS_EFI_IMG(img_report) && (safe_strlen(psz_basename) >= 7) &&
+			(safe_strnicmp(psz_basename, "efi", 3) == 0) &&
+			(safe_stricmp(&psz_basename[strlen(psz_basename) - 4], ".img") == 0))
 			static_strcpy(img_report.efi_img_path, psz_fullpath);
 
 		// Check for the EFI boot entries
@@ -1170,7 +1171,7 @@ BOOL ExtractEfiImgFiles(const char* dir)
 	iso9660_readfat_private* p_private = NULL;
 	libfat_sector_t s;
 	int32_t dc, c;
-	struct libfat_filesystem *fs = NULL;
+	struct libfat_filesystem *lf_fs = NULL;
 	struct libfat_direntry direntry;
 	char name[12] = { 0 };
 	char path[64];
@@ -1201,17 +1202,17 @@ BOOL ExtractEfiImgFiles(const char* dir)
 		uprintf("Error reading ISO-9660 file %s at LSN %lu\n", img_report.efi_img_path, (long unsigned int)p_private->lsn);
 		goto out;
 	}
-	fs = libfat_open(iso9660_readfat, (intptr_t)p_private);
-	if (fs == NULL) {
+	lf_fs = libfat_open(iso9660_readfat, (intptr_t)p_private);
+	if (lf_fs == NULL) {
 		uprintf("FAT access error");
 		goto out;
 	}
 
 	// Navigate to /EFI/BOOT
-	if (libfat_searchdir(fs, 0, "EFI        ", &direntry) < 0)
+	if (libfat_searchdir(lf_fs, 0, "EFI        ", &direntry) < 0)
 		goto out;
 	dc = direntry.entry[26] + (direntry.entry[27] << 8);
-	if (libfat_searchdir(fs, dc, "BOOT       ", &direntry) < 0)
+	if (libfat_searchdir(lf_fs, dc, "BOOT       ", &direntry) < 0)
 		goto out;
 	dc = direntry.entry[26] + (direntry.entry[27] << 8);
 
@@ -1228,7 +1229,7 @@ BOOL ExtractEfiImgFiles(const char* dir)
 			} else
 				name[k++] = toupper(efi_bootname[i][j]);
 		}
-		c = libfat_searchdir(fs, dc, name, &direntry);
+		c = libfat_searchdir(lf_fs, dc, name, &direntry);
 		if (c > 0) {
 			if (dir == NULL) {
 				if (!ret)
@@ -1265,9 +1266,9 @@ BOOL ExtractEfiImgFiles(const char* dir)
 				}
 
 				written = 0;
-				s = libfat_clustertosector(fs, c);
+				s = libfat_clustertosector(lf_fs, c);
 				while ((s != 0) && (s < 0xFFFFFFFFULL) && (written < file_size)) {
-					buf = libfat_get_sector(fs, s);
+					buf = libfat_get_sector(lf_fs, s);
 					size = MIN(LIBFAT_SECTOR_SIZE, file_size - written);
 					if (!WriteFileWithRetry(handle, buf, size, &size, WRITE_RETRIES) ||
 						(size != MIN(LIBFAT_SECTOR_SIZE, file_size - written))) {
@@ -1276,7 +1277,7 @@ BOOL ExtractEfiImgFiles(const char* dir)
 						continue;
 					}
 					written += size;
-					s = libfat_nextsector(fs, s);
+					s = libfat_nextsector(lf_fs, s);
 				}
 				CloseHandle(handle);
 				ret = TRUE;
@@ -1285,8 +1286,8 @@ BOOL ExtractEfiImgFiles(const char* dir)
 	}
 
 out:
-	if (fs != NULL)
-		libfat_close(fs);
+	if (lf_fs != NULL)
+		libfat_close(lf_fs);
 	if (p_statbuf != NULL)
 		safe_free(p_statbuf->rr.psz_symlink);
 	safe_free(p_statbuf);
