@@ -42,6 +42,7 @@
 #define LEFT_TO_RIGHT_EMBEDDING     "‪"
 #define RIGHT_TO_LEFT_EMBEDDING     "‫"
 #define POP_DIRECTIONAL_FORMATTING  "‬"
+#define LEFT_TO_RIGHT_OVERRIDE      "‭"
 #define RIGHT_TO_LEFT_OVERRIDE      "‮"
 #define DRIVE_ACCESS_TIMEOUT        15000		// How long we should retry drive access (in ms)
 #define DRIVE_ACCESS_RETRIES        150			// How many times we should retry
@@ -53,7 +54,7 @@
 #define MAX_TOOLTIPS                128
 #define MAX_SIZE_SUFFIXES           6			// bytes, KB, MB, GB, TB, PB
 #define MAX_CLUSTER_SIZES           18
-#define MAX_PROGRESS                (0xFFFF-1)	// leave room for 1 more for insta-progress workaround
+#define MAX_PROGRESS                0xFFFF
 #define MAX_LOG_SIZE                0x7FFFFFFE
 #define MAX_REFRESH                 25			// How long we should wait to refresh UI elements (in ms)
 #define MAX_GUID_STRING_LENGTH      40
@@ -62,6 +63,7 @@
 #define MBR_UEFI_MARKER             0x49464555	// 'U', 'E', 'F', 'I', as a 32 bit little endian longword
 #define STATUS_MSG_TIMEOUT          3500		// How long should cheat mode messages appear for on the status bar
 #define WRITE_RETRIES               3
+#define MARQUEE_TIMER_REFRESH       10			// Time between progress bar marquee refreshes, in ms
 #define FS_DEFAULT                  FS_FAT32
 #define SINGLE_CLUSTERSIZE_DEFAULT  0x00000100
 #define BADBLOCK_PATTERNS           {0xaa, 0x55, 0xff, 0x00}
@@ -72,6 +74,7 @@
 #define FAT32_CLUSTER_THRESHOLD     1.011f		// For FAT32, cluster size changes don't occur at power of 2 boundaries but sligthly above
 #define DD_BUFFER_SIZE              65536		// Minimum size of the buffer we use for DD operations
 #define UBUFFER_SIZE                2048
+#define CBN_SELCHANGE_INTERNAL      (CBN_SELCHANGE + 256)
 #define RUFUS_URL                   "https://rufus.ie"
 #define DOWNLOAD_URL                RUFUS_URL "/downloads"
 #define FILES_URL                   RUFUS_URL "/files"
@@ -185,7 +188,8 @@ enum timer_type {
 	TID_BADBLOCKS_UPDATE,
 	TID_APP_TIMER,
 	TID_BLOCKING_TIMER,
-	TID_REFRESH_TIMER
+	TID_REFRESH_TIMER,
+	TID_MARQUEE_TIMER
 };
 
 /* Action type, for progress bar breakdown */
@@ -398,7 +402,7 @@ extern int64_t iso_blocking_status;
 extern uint16_t rufus_version[3], embedded_sl_version[2];
 extern int nWindowsVersion;
 extern int nWindowsBuildNumber;
-extern int fs, bt, ps, tt;
+extern int fs, bt, pt, tt;
 extern char WindowsVersionStr[128];
 extern size_t ubuffer_pos;
 extern char ubuffer[UBUFFER_SIZE];
@@ -512,6 +516,7 @@ extern BYTE SearchProcess(char* HandleName, DWORD dwTimeout, BOOL bPartialMatch,
 extern BOOL EnablePrivileges(void);
 extern void FlashTaskbar(HANDLE handle);
 extern DWORD WaitForSingleObjectWithMessages(HANDLE hHandle, DWORD dwMilliseconds);
+extern HICON CreateMirroredIcon(HICON hiconOrg);
 #define GetTextWidth(hDlg, id) GetTextSize(GetDlgItem(hDlg, id), NULL).cx
 
 DWORD WINAPI FormatThread(void* param);

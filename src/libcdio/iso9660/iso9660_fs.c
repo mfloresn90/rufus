@@ -717,7 +717,6 @@ _iso9660_dir_to_statbuf (iso9660_dir_t *p_iso9660_dir,
   iso711_t i_fname;
   unsigned int stat_len;
   iso9660_stat_t *p_stat = last_p_stat;
-  bool err;
   char rr_fname[256] = "";
   int  i_rr_fname;
 
@@ -738,17 +737,9 @@ _iso9660_dir_to_statbuf (iso9660_dir_t *p_iso9660_dir,
     }
   p_stat->type    = (p_iso9660_dir->file_flags & ISO_DIRECTORY)
     ? _STAT_DIR : _STAT_FILE;
-  p_stat->lsn[p_stat->extents] = from_733_with_err (p_iso9660_dir->extent, &err);
-  if (err) {
-    free(p_stat);
-    return NULL;
-  }
-  p_stat->size[p_stat->extents] = from_733_with_err (p_iso9660_dir->size, &err);
+  p_stat->lsn[p_stat->extents] = from_733 (p_iso9660_dir->extent);
+  p_stat->size[p_stat->extents] = from_733 (p_iso9660_dir->size);
   p_stat->total_size += p_stat->size[p_stat->extents];
-  if (err) {
-    free(p_stat);
-    return NULL;
-  }
   p_stat->secsize[p_stat->extents] = _cdio_len2blocks (p_stat->size[p_stat->extents], ISO_BLOCKSIZE);
   p_stat->rr.b3_rock = dunno; /*FIXME should do based on mask */
   p_stat->b_xa    = false;

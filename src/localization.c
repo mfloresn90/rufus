@@ -76,8 +76,6 @@ char* default_msg_table[MSG_MAX-MSG_000] = {"%s", 0};
 char* current_msg_table[MSG_MAX-MSG_000] = {"%s", 0};
 char** msg_table = NULL;
 
-extern BOOL progress_in_use;
-
 static void mtab_destroy(BOOL reinit)
 {
 	size_t j;
@@ -367,8 +365,9 @@ char* lmprintf(uint32_t msg_id, ...)
 	static int buf_id = 0;
 	static char buf[LOC_MESSAGE_NB][LOC_MESSAGE_SIZE];
 	char *format = NULL;
+	size_t pos = 0;
 	va_list args;
-	BOOL needs_rtf_rtl_marks = (msg_id & MSG_RTF) && right_to_left_mode;
+	BOOL is_rtf = (msg_id & MSG_RTF);
 
 	buf_id %= LOC_MESSAGE_NB;
 	buf[buf_id][0] = 0;
@@ -381,13 +380,22 @@ char* lmprintf(uint32_t msg_id, ...)
 	if (format == NULL) {
 		safe_sprintf(buf[buf_id], LOC_MESSAGE_SIZE-1, "MSG_%03d UNTRANSLATED", msg_id - MSG_000);
 	} else {
-		if (needs_rtf_rtl_marks)
-			safe_strcpy(buf[buf_id], LOC_MESSAGE_SIZE-1, "\\rtlch");
+		if (right_to_left_mode) {
+			if (is_rtf) {
+				safe_strcpy(&buf[buf_id][pos], LOC_MESSAGE_SIZE - 1, "\\rtlch");
+				pos += 6;
+			}
+			safe_strcpy(&buf[buf_id][pos], LOC_MESSAGE_SIZE - 1, RIGHT_TO_LEFT_EMBEDDING);
+			pos += sizeof(RIGHT_TO_LEFT_EMBEDDING) - 1;
+		}
 		va_start(args, msg_id);
-		safe_vsnprintf(&buf[buf_id][needs_rtf_rtl_marks?6:0], LOC_MESSAGE_SIZE-1, format, args);
+		safe_vsnprintf(&buf[buf_id][pos], LOC_MESSAGE_SIZE- 1 - 2*pos, format, args);
 		va_end(args);
-		if (needs_rtf_rtl_marks)
-			safe_strcat(buf[buf_id], LOC_MESSAGE_SIZE-1, "\\ltrch");
+		if (right_to_left_mode) {
+			safe_strcat(buf[buf_id], LOC_MESSAGE_SIZE - 1, POP_DIRECTIONAL_FORMATTING);
+			if (is_rtf)
+				safe_strcat(buf[buf_id], LOC_MESSAGE_SIZE - 1, "\\ltrch");
+		}
 		buf[buf_id][LOC_MESSAGE_SIZE-1] = '\0';
 	}
 	return buf[buf_id++];
@@ -413,16 +421,7 @@ static uint64_t last_msg_time[2] = { 0, 0 };
 
 static void PrintInfoMessage(char* msg) {
 	SetWindowTextU(hProgress, msg);
-	// Make sure our field gets redrawn
-	// If the progress bar is not active, it looks like WM_PAINT is
-	// ignored. But InvalidateRect is causing refresh tearing so we
-	// don't want to use that while active.
-	// Refresh still sucks though and marquee no longer works... :(
-	// TODO: Create our own progress bar control with text overlay and inverted text
-	if (!progress_in_use)
-		InvalidateRect(hProgress, NULL, TRUE);
-	else
-		SendMessage(hProgress, WM_PAINT, 0, 0);
+	InvalidateRect(hProgress, NULL, TRUE);
 }
 static void PrintStatusMessage(char* msg) {
 	SendMessageLU(hStatus, SB_SETTEXTW, SBT_OWNERDRAW | SB_SECTION_LEFT, msg);

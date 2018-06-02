@@ -407,7 +407,7 @@ void CreateStatusBar(void)
 	HFONT hFont;
 
 	// Create the status bar
-	hStatus = CreateWindowExW(0, STATUSCLASSNAME, NULL, WS_CHILD | WS_VISIBLE | SBARS_TOOLTIPS,
+	hStatus = CreateWindowEx(0, STATUSCLASSNAME, NULL, WS_CHILD | WS_VISIBLE | SBARS_TOOLTIPS,
 		CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, hMainDialog,
 		(HMENU)IDC_STATUS, hMainInstance, NULL);
 
@@ -485,12 +485,12 @@ void ResizeMoveCtrl(HWND hDlg, HWND hCtrl, int dx, int dy, int dw, int dh, float
 	MoveWindow(hCtrl, point.x + (int)(scale*(float)dx), point.y + (int)(scale*(float)dy),
 		(rect.right - rect.left) + (int)(scale*(float)dw + border.cx),
 		(rect.bottom - rect.top) + (int)(scale*(float)dh + border.cy), TRUE);
-	InvalidateRect(hCtrl, NULL, TRUE);
+	// Don't be tempted to call InvalidateRect() here - it causes intempestive whole screen refreshes
 }
 
 void ResizeButtonHeight(HWND hDlg, int id)
 {
-	HWND hCtrl;
+	HWND hCtrl, hPrevCtrl;
 	RECT rc;
 	int dy = 0;
 
@@ -499,7 +499,8 @@ void ResizeButtonHeight(HWND hDlg, int id)
 	MapWindowPoints(NULL, hDlg, (POINT*)&rc, 2);
 	if (rc.bottom - rc.top < bh)
 		dy = (bh - (rc.bottom - rc.top)) / 2;
-	SetWindowPos(hCtrl, HWND_TOP, rc.left, rc.top - dy, rc.right - rc.left, bh, 0);
+	hPrevCtrl = GetNextWindow(hCtrl, GW_HWNDPREV);
+	SetWindowPos(hCtrl, hPrevCtrl, rc.left, rc.top - dy, rc.right - rc.left, bh, 0);
 }
 
 /*
@@ -1072,7 +1073,9 @@ INT_PTR CALLBACK TooltipCallback(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
 		case TTN_GETDISPINFOW:
 			lpnmtdi = (LPNMTTDISPINFOW)lParam;
 			lpnmtdi->lpszText = ttlist[i].wstring;
-			SendMessage(hDlg, TTM_SETMAXTIPWIDTH, 0, 300);
+			// Don't ask me WHY we need to clear RTLREADING for RTL multiline text to look good
+			lpnmtdi->uFlags &= ~TTF_RTLREADING;
+			SendMessage(hDlg, TTM_SETMAXTIPWIDTH, 0, (LPARAM)(int)(150.0f * fScale));
 			return (INT_PTR)TRUE;
 		}
 		break;
@@ -1112,7 +1115,8 @@ BOOL CreateTooltip(HWND hControl, const char* message, int duration)
 	}
 
 	// Create the tooltip window
-	ttlist[i].hTip = CreateWindowExW(0, TOOLTIPS_CLASS, NULL, WS_POPUP | TTS_NOPREFIX | TTS_ALWAYSTIP,
+	ttlist[i].hTip = CreateWindowEx(right_to_left_mode ? WS_EX_LAYOUTRTL : 0,
+		TOOLTIPS_CLASS, NULL, WS_POPUP | TTS_NOPREFIX | TTS_ALWAYSTIP,
 		CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, hMainDialog, NULL,
 		hMainInstance, NULL);
 
@@ -1264,7 +1268,7 @@ static void Reposition(HWND hDlg, int id, int dx, int dw)
 static void PositionControls(HWND hDlg)
 {
 	RECT rc;
-	HWND hCtrl;
+	HWND hCtrl, hPrevCtrl;
 	int i, ow, dw;	// original width, delta
 
 	// Get the original size of the control
@@ -1319,11 +1323,13 @@ static void PositionControls(HWND hDlg)
 	hCtrl = GetDlgItem(hDlg, IDC_CHECK_NOW);
 	GetWindowRect(hCtrl, &rc);
 	MapWindowPoints(NULL, hDlg, (POINT*)&rc, 2);
-	SetWindowPos(hCtrl, HWND_TOP, rc.left, rc.top, rc.right - rc.left, ddbh, 0);
+	hPrevCtrl = GetNextWindow(hCtrl, GW_HWNDPREV);
+	SetWindowPos(hCtrl, hPrevCtrl, rc.left, rc.top, rc.right - rc.left, ddbh, 0);
 	hCtrl = GetDlgItem(hDlg, IDCANCEL);
 	GetWindowRect(hCtrl, &rc);
 	MapWindowPoints(NULL, hDlg, (POINT*)&rc, 2);
-	SetWindowPos(hCtrl, HWND_TOP, rc.left, rc.top, rc.right - rc.left, ddbh, 0);
+	hPrevCtrl = GetNextWindow(hCtrl, GW_HWNDPREV);
+	SetWindowPos(hCtrl, hPrevCtrl, rc.left, rc.top, rc.right - rc.left, ddbh, 0);
 }
 
 /*
@@ -1754,7 +1760,7 @@ LPCDLGTEMPLATE GetDialogTemplate(int Dialog_ID)
 	if (right_to_left_mode) {
 		// Add the RTL styles into our RC copy, so that we don't have to multiply dialog definitions in the RC
 		dwBuf = (DWORD*)rcTemplate;
-		dwBuf[2] = WS_EX_RTLREADING | WS_EX_APPWINDOW | WS_EX_LAYOUTRTL;
+		dwBuf[2] = WS_EX_APPWINDOW | WS_EX_LAYOUTRTL;
 	}
 
 	// All our dialogs are set to use 'Segoe UI Symbol' by default:
@@ -1920,6 +1926,64 @@ void FlashTaskbar(HANDLE handle)
 	pf.uCount = 5;
 	pf.dwTimeout = 75;
 	FlashWindowEx(&pf);
+}
+
+// https://docs.microsoft.com/en-us/globalization/localizability/mirroring-in-win32
+// Note: This function *destroys* the original icon
+HICON CreateMirroredIcon(HICON hiconOrg)
+{
+	HDC hdcScreen, hdcBitmap, hdcMask = NULL;
+	HBITMAP hbm, hbmMask, hbmOld, hbmOldMask;
+	BITMAP bm;
+	ICONINFO ii;
+	HICON hicon = NULL;
+	hdcBitmap = CreateCompatibleDC(NULL);
+	if (hdcBitmap) {
+		hdcMask = CreateCompatibleDC(NULL);
+		if (hdcMask) {
+			SetLayout(hdcBitmap, LAYOUT_RTL);
+			SetLayout(hdcMask, LAYOUT_RTL);
+		} else {
+			DeleteDC(hdcBitmap);
+			hdcBitmap = NULL;
+		}
+	}
+	hdcScreen = GetDC(NULL);
+	if (hdcScreen) {
+		if (hdcBitmap && hdcMask) {
+			if (hiconOrg) {
+				if (GetIconInfo(hiconOrg, &ii) && GetObject(ii.hbmColor, sizeof(BITMAP), &bm)) {
+					// Do the cleanup for the bitmaps.
+					DeleteObject(ii.hbmMask);
+					DeleteObject(ii.hbmColor);
+					ii.hbmMask = ii.hbmColor = NULL;
+					hbm = CreateCompatibleBitmap(hdcScreen, bm.bmWidth, bm.bmHeight);
+					hbmMask = CreateBitmap(bm.bmWidth, bm.bmHeight, 1, 1, NULL);
+					hbmOld = (HBITMAP)SelectObject(hdcBitmap, hbm);
+					hbmOldMask = (HBITMAP)SelectObject(hdcMask, hbmMask);
+					DrawIconEx(hdcBitmap, 0, 0, hiconOrg, bm.bmWidth, bm.bmHeight, 0, NULL, DI_IMAGE);
+					DrawIconEx(hdcMask, 0, 0, hiconOrg, bm.bmWidth, bm.bmHeight, 0, NULL, DI_MASK);
+					SelectObject(hdcBitmap, hbmOld);
+					SelectObject(hdcMask, hbmOldMask);
+
+					// Create the new mirrored icon and delete bitmaps
+					ii.hbmMask = hbmMask;
+					ii.hbmColor = hbm;
+					hicon = CreateIconIndirect(&ii);
+					DeleteObject(hbm);
+					DeleteObject(hbmMask);
+				}
+			}
+		}
+		ReleaseDC(NULL, hdcScreen);
+	}
+
+	if (hdcBitmap)
+		DeleteDC(hdcBitmap);
+	if (hdcMask)
+		DeleteDC(hdcMask);
+	DestroyIcon(hiconOrg);
+	return hicon;
 }
 
 #ifdef RUFUS_TEST

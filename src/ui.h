@@ -22,6 +22,34 @@
 
 #pragma once
 
+// Progress bar colors
+#define PROGRESS_BAR_NORMAL_TEXT_COLOR		RGB(0x00, 0x00, 0x00)
+#define PROGRESS_BAR_INVERTED_TEXT_COLOR	RGB(0xFF, 0xFF, 0xFF)
+#define PROGRESS_BAR_BACKGROUND_COLOR		RGB(0xE6, 0xE6, 0xE6)
+#define PROGRESS_BAR_BOX_COLOR				RGB(0xBC, 0xBC, 0xBC)
+#define PROGRESS_BAR_NORMAL_COLOR			RGB(0x06, 0xB0, 0x25)
+#define PROGRESS_BAR_PAUSED_COLOR			RGB(0xDA, 0xCB, 0x26)
+#define PROGRESS_BAR_ERROR_COLOR			RGB(0xDA, 0x26, 0x26)
+
+// Toolbar icons main color
+#define TOOLBAR_ICON_COLOR					RGB(0x29, 0x80, 0xB9)
+
+// Toolbar default style
+#define TOOLBAR_STYLE						( WS_CHILD | WS_TABSTOP | WS_VISIBLE | \
+											  WS_CLIPSIBLINGS | WS_CLIPCHILDREN  | \
+											  CCS_NOPARENTALIGN | CCS_NODIVIDER  | \
+											  TBSTYLE_FLAT | TBSTYLE_BUTTON      | \
+											  TBSTYLE_AUTOSIZE | TBSTYLE_LIST    | \
+											  TBSTYLE_TOOLTIPS )
+
+static int section_control_ids[] = {
+	IDS_DRIVE_PROPERTIES_TXT,
+	IDS_FORMAT_OPTIONS_TXT,
+	IDS_STATUS_TXT
+};
+
+static int section_vpos[ARRAYSIZE(section_control_ids)];
+
 static int image_option_move_ids[] = {
 	IDS_PARTITION_TYPE_TXT,
 	IDC_PARTITION_TYPE,
@@ -91,7 +119,7 @@ static int advanced_device_move_ids[] = {
 };
 
 static int advanced_device_toggle_ids[] = {
-	IDC_SAVE,
+	IDC_SAVE_TOOLBAR,
 	IDC_LIST_USB_HDD,
 	IDC_OLD_BIOS_FIXES,
 	IDC_RUFUS_MBR,
@@ -162,8 +190,8 @@ static int half_width_ids[] = {
 };
 
 static int adjust_dpi_ids[][5] = {
-	{IDS_DEVICE_TXT, IDC_DEVICE, IDC_SAVE, 0, 0},
-	{IDS_BOOT_SELECTION_TXT, IDC_BOOT_SELECTION, IDC_HASH, IDC_SELECT, 0},
+	{IDS_DEVICE_TXT, IDC_DEVICE, IDC_SAVE_TOOLBAR, 0, 0},
+	{IDS_BOOT_SELECTION_TXT, IDC_BOOT_SELECTION, IDC_HASH_TOOLBAR, IDC_SELECT, 0},
 	{IDS_IMAGE_OPTION_TXT, IDC_IMAGE_OPTION, 0, 0, 0},
 	{IDS_PARTITION_TYPE_TXT, IDC_PARTITION_TYPE, IDS_TARGET_SYSTEM_TXT, IDC_TARGET_SYSTEM, IDS_CSM_HELP_TXT},
 	{IDC_ADVANCED_DEVICE_TOOLBAR, 0, 0, 0, 0},
@@ -180,4 +208,11 @@ static int adjust_dpi_ids[][5] = {
 	{IDS_STATUS_TXT, 0, 0, 0, 0},
 	{IDC_PROGRESS, 0, 0, 0, 0 },
 	{IDC_MULTI_TOOLBAR, IDC_TEST, IDC_START, IDCANCEL, 0}
+};
+
+static int multitoolbar_icons[] = {
+	IDI_LANG_16,
+	IDI_INFO_16,
+	IDI_SETTINGS_16,
+	IDI_LOG_16
 };

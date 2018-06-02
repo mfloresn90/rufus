@@ -61,7 +61,7 @@ static int task_number = 0;
 extern const int nb_steps[FS_MAX];
 extern uint32_t dur_mins, dur_secs;
 static int fs_index = 0, wintogo_index = -1;
-extern BOOL force_large_fat32, enable_ntfs_compression, lock_drive, zero_drive, disable_file_indexing, write_as_image;
+extern BOOL force_large_fat32, enable_ntfs_compression, lock_drive, zero_drive, enable_file_indexing, write_as_image;
 uint8_t *grub2_buf = NULL;
 long grub2_len;
 static BOOL WritePBR(HANDLE hLogicalDrive);
@@ -676,15 +676,17 @@ static BOOL FormatDrive(DWORD DriveIndex)
 	BOOL r = FALSE;
 	PF_DECL(FormatEx);
 	PF_DECL(EnableVolumeCompression);
-	char FSType[32], path[MAX_PATH];
+	char FSType[64], path[MAX_PATH];
 	char *locale, *VolumeName = NULL;
 	WCHAR* wVolumeName = NULL;
 	WCHAR wFSType[64];
 	WCHAR wLabel[64];
 	ULONG ulClusterSize;
-	size_t i;
+	size_t i, index;
 
 	GetWindowTextU(hFileSystem, FSType, ARRAYSIZE(FSType));
+	// Skip the RIGHT_TO_LEFT_EMBEDDING mark from LTR languages
+	index = (strncmp(FSType, RIGHT_TO_LEFT_EMBEDDING, sizeof(RIGHT_TO_LEFT_EMBEDDING) - 1) == 0) ? (sizeof(RIGHT_TO_LEFT_EMBEDDING) - 1) : 0;
 	// Might have a (Default) suffix => remove it
 	for (i=strlen(FSType); i>2; i--) {
 		if (FSType[i] == '(') {
@@ -693,9 +695,9 @@ static BOOL FormatDrive(DWORD DriveIndex)
 		}
 	}
 	if ((fs == FS_UDF) && !((dur_mins == 0) && (dur_secs == 0))) {
-		PrintInfoDebug(0, MSG_220, FSType, dur_mins, dur_secs);
+		PrintInfoDebug(0, MSG_220, &FSType[index], dur_mins, dur_secs);
 	} else {
-		PrintInfoDebug(0, MSG_222, FSType);
+		PrintInfoDebug(0, MSG_222, &FSType[index]);
 	}
 	VolumeName = GetLogicalName(DriveIndex, TRUE, TRUE);
 	wVolumeName = utf8_to_wchar(VolumeName);
@@ -727,6 +729,8 @@ static BOOL FormatDrive(DWORD DriveIndex)
 	setlocale(LC_ALL, locale);
 
 	GetWindowTextW(hFileSystem, wFSType, ARRAYSIZE(wFSType));
+	// Again, skip the RIGHT_TO_LEFT_EMBEDDING mark if present
+	index = (wFSType[0] == 0x202b) ? 1 : 0;
 	// We may have a " (Default)" trail
 	for (i=0; i<wcslen(wFSType); i++) {
 		if (wFSType[i] == ' ') {
@@ -750,7 +754,7 @@ static BOOL FormatDrive(DWORD DriveIndex)
 	fs_index = (int)ComboBox_GetItemData(hFileSystem, ComboBox_GetCurSel(hFileSystem));
 
 	uprintf("%s format was selected\n", IsChecked(IDC_QUICK_FORMAT)?"Quick":"Slow");
-	pfFormatEx(wVolumeName, SelectedDrive.MediaType, wFSType, wLabel,
+	pfFormatEx(wVolumeName, SelectedDrive.MediaType, &wFSType[index], wLabel,
 		IsChecked(IDC_QUICK_FORMAT), ulClusterSize, FormatExCallback);
 
 	if ((fs == FS_NTFS) && (enable_ntfs_compression) && (pfEnableVolumeCompression != NULL)) {
@@ -1601,7 +1605,7 @@ static BOOL WriteDrive(HANDLE hPhysicalDrive, HANDLE hSourceImage)
 				if (s)
 					uprintf("write error: Wrote %d bytes, expected %d bytes", wSize, rSize);
 				else
-					uprintf("write error at sector %d: %s", wb / SelectedDrive.SectorSize, WindowsErrorString());
+					uprintf("write error at sector %" PRIi64 ": %s", wb / SelectedDrive.SectorSize, WindowsErrorString());
 				if (i < WRITE_RETRIES - 1) {
 					li.QuadPart = wb;
 					uprintf("  RETRYING...\n");
@@ -1662,7 +1666,7 @@ DWORD WINAPI FormatThread(void* param)
 	if (large_drive)
 		uprintf("Notice: Large drive detected (may produce short writes)");
 	// Find out if we need to add any extra partitions
-	if ((windows_to_go) && (tt == TT_UEFI) && (ps == PARTITION_STYLE_GPT))
+	if ((windows_to_go) && (tt == TT_UEFI) && (pt == PARTITION_STYLE_GPT))
 		// According to Microsoft, every GPT disk (we RUN Windows from) must have an MSR due to not having hidden sectors
 		// http://msdn.microsoft.com/en-us/library/windows/hardware/dn640535.aspx#gpt_faq_what_disk_require_msr
 		extra_partitions = XP_MSR | XP_EFI;
@@ -1728,7 +1732,7 @@ DWORD WINAPI FormatThread(void* param)
 	}
 	CHECK_FOR_USER_CANCEL;
 
-	if (!zero_drive) {
+	if (!zero_drive && !write_as_image) {
 		PrintInfoDebug(0, MSG_226);
 		AnalyzeMBR(hPhysicalDrive, "Drive");
 		if ((hLogicalVolume != NULL) && (hLogicalVolume != INVALID_HANDLE_VALUE)) {
@@ -1746,7 +1750,7 @@ DWORD WINAPI FormatThread(void* param)
 	// Note, Microsoft's way of cleaning partitions (IOCTL_DISK_CREATE_DISK, which is what we apply
 	// in InitializeDisk) is *NOT ENOUGH* to reset a disk and can render it inoperable for partitioning
 	// or formatting under Windows. See https://github.com/pbatard/rufus/issues/759 for details.
-	if ((bt != BT_IMAGE) || (img_report.is_iso)) {
+	if ((bt != BT_IMAGE) || (img_report.is_iso && !write_as_image)) {
 		if ((!ClearMBRGPT(hPhysicalDrive, SelectedDrive.DiskSize, SelectedDrive.SectorSize, use_large_fat32)) ||
 			(!InitializeDisk(hPhysicalDrive))) {
 			uprintf("Could not reset partitions\n");
@@ -1848,7 +1852,7 @@ DWORD WINAPI FormatThread(void* param)
 	UpdateProgress(OP_ZERO_MBR, -1.0f);
 	CHECK_FOR_USER_CANCEL;
 
-	if (!CreatePartition(hPhysicalDrive, ps, fs, (ps==PARTITION_STYLE_MBR) && (tt==TT_UEFI), extra_partitions)) {
+	if (!CreatePartition(hPhysicalDrive, pt, fs, (pt==PARTITION_STYLE_MBR) && (tt==TT_UEFI), extra_partitions)) {
 		FormatStatus = ERROR_SEVERITY_ERROR|FAC(FACILITY_STORAGE)|ERROR_PARTITION_FAILURE;
 		goto out;
 	}
@@ -1882,7 +1886,7 @@ DWORD WINAPI FormatThread(void* param)
 	}
 
 	// Thanks to Microsoft, we must fix the MBR AFTER the drive has been formatted
-	if (ps == PARTITION_STYLE_MBR) {
+	if (pt == PARTITION_STYLE_MBR) {
 		PrintInfoDebug(0, MSG_228);	// "Writing master boot record..."
 		if ((!WriteMBR(hPhysicalDrive)) || (!WriteSBR(hPhysicalDrive))) {
 			if (!IS_ERROR(FormatStatus))
@@ -1911,13 +1915,12 @@ DWORD WINAPI FormatThread(void* param)
 	}
 	CHECK_FOR_USER_CANCEL;
 
-	// Disable file indexing if the option was selected by the user
-	if ((disable_file_indexing) && ((fs == FS_NTFS) || (fs == FS_UDF) || (fs == FS_REFS))) {
-		if (SetFileAttributesA(guid_volume, FILE_ATTRIBUTE_NOT_CONTENT_INDEXED))
-			uprintf("File indexing has been set to: Disabled");
-		else
+	// Disable file indexing, unless it was force-enabled by the user
+	if ((!enable_file_indexing) && ((fs == FS_NTFS) || (fs == FS_UDF) || (fs == FS_REFS))) {
+		uprintf("Disabling file indexing...");
+		if (!SetFileAttributesA(guid_volume, FILE_ATTRIBUTE_NOT_CONTENT_INDEXED))
 			uprintf("Could not disable file indexing: %s", WindowsErrorString());
-	} else
+	}
 
 	// Refresh the drive label - This is needed as Windows may have altered it from
 	// the name we proposed, and we require an exact label, to patch config files.
