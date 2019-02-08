@@ -512,6 +512,22 @@ static __inline int PathGetDriveNumberU(char* lpPath)
 	return ret;
 }
 
+// This one is tricky since we can't blindly convert a
+// UTF-16 position to a UTF-8 one. So we do it manually.
+static __inline const char* PathFindFileNameU(const char* szPath)
+{
+	size_t i;
+	if (szPath == NULL)
+		return NULL;
+	for (i = strlen(szPath); i != 0; i--) {
+		if ((szPath[i] == '/') || (szPath[i] == '\\')) {
+			i++;
+			break;
+		}
+	}
+	return &szPath[i];
+}
+
 // This function differs from regular GetTextExtentPoint in that it uses a zero terminated string
 static __inline BOOL GetTextExtentPointU(HDC hdc, const char* lpString, LPSIZE lpSize)
 {
@@ -665,7 +681,13 @@ static __inline DWORD GetFileAttributesU(const char* lpFileName)
 {
 	DWORD ret = 0xFFFFFFFF, err = ERROR_INVALID_DATA;
 	wconvert(lpFileName);
-	ret = GetFileAttributesW(wlpFileName);
+	// Unlike Microsoft's version, ours doesn't fail if the string is quoted
+	if ((wlpFileName[0] == L'"') && (wlpFileName[wcslen(wlpFileName) - 1] == L'"')) {
+		wlpFileName[wcslen(wlpFileName) - 1] = 0;
+		ret = GetFileAttributesW(&wlpFileName[1]);
+	} else {
+		ret = GetFileAttributesW(wlpFileName);
+	}
 	err = GetLastError();
 	wfree(lpFileName);
 	SetLastError(err);

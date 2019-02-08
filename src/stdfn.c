@@ -1,7 +1,7 @@
 /*
  * Rufus: The Reliable USB Formatting Utility
  * Standard Windows function calls
- * Copyright © 2013-2017 Pete Batard <pete@akeo.ie>
+ * Copyright © 2013-2018 Pete Batard <pete@akeo.ie>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -35,6 +35,16 @@
 int  nWindowsVersion = WINDOWS_UNDEFINED;
 int  nWindowsBuildNumber = -1;
 char WindowsVersionStr[128] = "Windows ";
+
+// __popcnt16, __popcnt, __popcnt64 are not available for ARM :(
+uint8_t popcnt8(uint8_t val)
+{
+	static const uint8_t nibble_lookup[16] = {
+		0, 1, 1, 2, 1, 2, 2, 3,
+		1, 2, 2, 3, 2, 3, 3, 4
+	};
+	return nibble_lookup[val & 0x0F] + nibble_lookup[val >> 4];
+}
 
 /*
  * Hash table functions - modified From glibc 2.3.2:
@@ -220,13 +230,32 @@ BOOL is_x64(void)
 	return ret;
 }
 
+int GetCpuArch(void)
+{
+	SYSTEM_INFO info = { 0 };
+	GetNativeSystemInfo(&info);
+	switch (info.wProcessorArchitecture) {
+	case PROCESSOR_ARCHITECTURE_AMD64:
+		return CPU_ARCH_X86_64;
+	case PROCESSOR_ARCHITECTURE_INTEL:
+		return CPU_ARCH_X86_64;
+	// TODO: Set this back to PROCESSOR_ARCHITECTURE_ARM64 when the MinGW headers have it
+	case 12:
+		return CPU_ARCH_ARM_64;
+	case PROCESSOR_ARCHITECTURE_ARM:
+		return CPU_ARCH_ARM_32;
+	default:
+		return CPU_ARCH_UNDEFINED;
+	}
+}
+
 // From smartmontools os_win32.cpp
 void GetWindowsVersion(void)
 {
 	OSVERSIONINFOEXA vi, vi2;
 	const char* w = 0;
 	const char* w64 = "32 bit";
-	char *vptr, build_number[10] = "";
+	char *vptr;
 	size_t vlen;
 	unsigned major, minor;
 	ULONGLONG major_equal, minor_equal;
@@ -323,14 +352,11 @@ void GetWindowsVersion(void)
 		safe_sprintf(vptr, vlen, "%s %s", w, w64);
 
 	// Add the build number for Windows 8.0 and later
+	nWindowsBuildNumber = vi.dwBuildNumber;
 	if (nWindowsVersion >= 0x62) {
-		GetRegistryKeyStr(REGKEY_HKLM, "Microsoft\\Windows NT\\CurrentVersion\\CurrentBuildNumber", build_number, sizeof(build_number));
-		if (build_number[0] != 0) {
-			nWindowsBuildNumber = atoi(build_number);	// Keep a global copy
-			static_strcat(WindowsVersionStr, " (Build ");
-			static_strcat(WindowsVersionStr, build_number);
-			static_strcat(WindowsVersionStr, ")");
-		}
+		vptr = &WindowsVersionStr[safe_strlen(WindowsVersionStr)];
+		vlen = sizeof(WindowsVersionStr) - safe_strlen(WindowsVersionStr) - 1;
+		safe_sprintf(vptr, vlen, " (Build %d)", nWindowsBuildNumber);
 	}
 
 }
@@ -565,26 +591,23 @@ DWORD RunCommand(const char* cmd, const char* dir, BOOL log)
 	DWORD ret, dwRead, dwAvail, dwPipeSize = 4096;
 	STARTUPINFOA si = {0};
 	PROCESS_INFORMATION pi = {0};
+	SECURITY_ATTRIBUTES sa = { sizeof(SECURITY_ATTRIBUTES), NULL, TRUE };
 	HANDLE hOutputRead = INVALID_HANDLE_VALUE, hOutputWrite = INVALID_HANDLE_VALUE;
-	HANDLE hDupOutputWrite = INVALID_HANDLE_VALUE;
 	static char* output;
 
 	si.cb = sizeof(si);
 	if (log) {
 		// NB: The size of a pipe is a suggestion, NOT an absolute guarantee
 		// This means that you may get a pipe of 4K even if you requested 1K
-		if (!CreatePipe(&hOutputRead, &hOutputWrite, NULL, dwPipeSize)) {
+		if (!CreatePipe(&hOutputRead, &hOutputWrite, &sa, dwPipeSize)) {
 			ret = GetLastError();
 			uprintf("Could not set commandline pipe: %s", WindowsErrorString());
 			goto out;
 		}
-		// We need an inheritable pipe endpoint handle
-		DuplicateHandle(GetCurrentProcess(), hOutputWrite, GetCurrentProcess(), &hDupOutputWrite,
-			0L, TRUE, DUPLICATE_CLOSE_SOURCE | DUPLICATE_SAME_ACCESS);
 		si.dwFlags = STARTF_USESHOWWINDOW | STARTF_USESTDHANDLES;
 		si.wShowWindow = SW_HIDE;
-		si.hStdOutput = hDupOutputWrite;
-		si.hStdError = hDupOutputWrite;
+		si.hStdOutput = hOutputWrite;
+		si.hStdError = hOutputWrite;
 	}
 
 	if (!CreateProcessU(NULL, cmd, NULL, NULL, TRUE,
@@ -622,7 +645,7 @@ DWORD RunCommand(const char* cmd, const char* dir, BOOL log)
 	CloseHandle(pi.hThread);
 
 out:
-	safe_closehandle(hDupOutputWrite);
+	safe_closehandle(hOutputWrite);
 	safe_closehandle(hOutputRead);
 	return ret;
 }
@@ -920,36 +943,4 @@ char* GetCurrentMUI(void)
 		static_strcpy(mui_str, "en-US");
 	}
 	return mui_str;
-}
-
-char* GetMuiString(char* szModuleName, UINT uID)
-{
-	HMODULE hModule;
-	char path[MAX_PATH], *str;
-	wchar_t* wstr;
-	void* ptr;
-	int len;
-	static_sprintf(path, "%s\\%s\\%s.mui", system_dir, GetCurrentMUI(), szModuleName);
-	// If the file doesn't exist, fall back to en-US
-	if (!PathFileExistsU(path))
-		static_sprintf(path, "%s\\en-US\\%s.mui", system_dir, szModuleName);
-	hModule = LoadLibraryExA(path, NULL, LOAD_LIBRARY_AS_IMAGE_RESOURCE | LOAD_LIBRARY_AS_DATAFILE);
-	if (hModule == NULL) {
-		uprintf("Could not load '%s': %s", path, WindowsErrorString());
-		return NULL;
-	}
-	// Calling LoadStringW with last parameter 0 returns the length of the string (without NUL terminator)
-	len = LoadStringW(hModule, uID, (LPWSTR)(&ptr), 0);
-	if (len <= 0) {
-		if (GetLastError() == ERROR_SUCCESS)
-			SetLastError(ERROR_RESOURCE_NAME_NOT_FOUND);
-		uprintf("Could not find string ID %d in '%s': %s", uID, path, WindowsErrorString());
-		return NULL;
-	}
-	len += 1;
-	wstr = calloc(len, sizeof(wchar_t));
-	len = LoadStringW(hModule, uID, wstr, len);
-	str = wchar_to_utf8(wstr);
-	free(wstr);
-	return str;
 }

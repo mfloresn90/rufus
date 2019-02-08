@@ -32,6 +32,7 @@
 #include <inttypes.h>
 #include <commctrl.h>
 #include <setupapi.h>
+#include <assert.h>
 
 #include "rufus.h"
 #include "missing.h"
@@ -141,8 +142,10 @@ BOOL ResetDevice(int index)
 		return FALSE;
 	}
 
-	if (DriveHub.String[index] == NULL)
+	if (DriveHub.String[index] == NULL) {
+		uprintf("The device you are trying to reset does not appear to be a USB device...");
 		return FALSE;
+	}
 
 	LastReset = GetTickCount64();
 
@@ -162,6 +165,7 @@ BOOL ResetDevice(int index)
 		uprintf("  Failed to cycle port: %s", WindowsErrorString());
 		goto out;
 	}
+	uprintf("Please wait for the device to re-appear...");
 	r = TRUE;
 
 out:
@@ -306,9 +310,9 @@ BOOL GetOpticalMedia(IMG_SAVE* img_save)
 /* For debugging user reports of HDDs vs UFDs */
 //#define FORCED_DEVICE
 #ifdef FORCED_DEVICE
-#define FORCED_VID 0x056E
-#define FORCED_PID 0x8008
-#define FORCED_NAME "Generic- USB3.0 CRW   -SD USB Device"
+#define FORCED_VID 0x067B
+#define FORCED_PID 0x2731
+#define FORCED_NAME "SD Card Reader USB Device"
 #endif
 
 /*
@@ -449,16 +453,12 @@ BOOL GetDevices(DWORD devnum)
 		if (strcmp(genstor_name[s], "SD") == 0)
 			card_start = s;
 	}
-	// Overkill, but better safe than sorry. And yeah, we could have used
-	// arrays of arrays to avoid this, but it's more readable this way.
-	if ((uasp_start <= 0) || (uasp_start >= ARRAYSIZE(usbstor_name))) {
-		uprintf("Spock gone crazy error in %s:%d", __FILE__, __LINE__);
-		goto out;
-	}
-	if ((card_start <= 0) || (card_start >= ARRAYSIZE(genstor_name))) {
-		uprintf("Spock gone crazy error in %s:%d", __FILE__, __LINE__);
-		goto out;
-	}
+
+	// Better safe than sorry. And yeah, we could have used arrays of
+	// arrays to avoid this, but it's more readable this way.
+	assert((uasp_start > 0) && (uasp_start < ARRAYSIZE(usbstor_name)));
+	assert((card_start > 0) && (card_start < ARRAYSIZE(genstor_name)));
+
 	devid_list = NULL;
 	if (full_list_size != 0) {
 		full_list_size += 1;	// add extra NUL terminator
